@@ -16,8 +16,9 @@ modelos, services, controllers, data, security, tests y `docs/api.md`.
 |----|--------|------|------------|
 | 01 | ✅ 2026-05-02 | Reconciliar `AGENTS.md` (path real `chat_umayor/` en raíz) + commitear docs locales | 2 commits `docs:` |
 | 02 | ✅ 2026-05-02 | `docs/api.md v0` — contrato de los 4 endpoints (request/response/errores) **sin implementar** — desbloquea a UI | 1 commit `docs:` |
-| 03 | ⏳ siguiente   | Módulo instalable end-to-end mínimo: controller `/chatbot` con respuesta placeholder JSON + cadena de imports (`__init__.py` raíz → `controllers/`) | 1 commit `feat:` + test smoke |
-| 04 |               | Modelo `chatbot.session` con FSM (estados §6 AGENTS), transiciones `_transition_to_*`, ACL en `ir.model.access.csv` | 1 commit `feat:` + `test_session_fsm.py` (RED→GREEN) |
+| 02.1 | ✅ 2026-05-02 | `docs/api.md v0.1` — clarifica transporte JSON-RPC 2.0 nativo de Odoo (no REST plano). Cierra TBD de CSRF | 1 commit `docs:` |
+| 03 | 🟡 2026-05-02 (pendiente validar en Odoo.sh staging) | Módulo instalable end-to-end mínimo: endpoint `/chat_umayor/ping` (JSON-RPC) + cadena de imports + `TestSmokePing` | 1 commit `feat:` |
+| 04 | ⏳ siguiente   | Modelo `chatbot.session` con FSM (estados §6 AGENTS), transiciones `_transition_to_*`, ACL en `ir.model.access.csv` | 1 commit `feat:` + `test_session_fsm.py` (RED→GREEN) |
 | 05 |               | Modelo `chatbot.message` + `_sanitize_for_llm()` + ACL + tests de sanitización | 1 commit `feat:` |
 | 06 |               | `services/gemini_client.py`: wrapper `google-genai` con `ir.config_parameter` (`chat_umayor.gemini_api_key`, `chat_umayor.system_prompt`), reintentos, fallbacks §7 AGENTS, **tests con mock** | 1 commit `feat:` + `test_gemini_client.py`. Elegir modelo Flash y registrarlo aquí. |
 | 07 |               | Endpoints reales: implementar los 4 endpoints del `docs/api.md`, conectar session + message + gemini; bump `docs/api.md` a `v1` | 1 commit `feat:` + `docs:` |
@@ -51,4 +52,4 @@ modelos, services, controllers, data, security, tests y `docs/api.md`.
 Cada PLAN es 1 commit atómico (o tanda pequeña): `git revert <sha>` o
 `git reset --hard <sha-anterior>` si todavía no hay push.
 
-<!-- v1.0 · 2026-05-02 · reemplaza el PLAN de auditoría por el roadmap de desarrollo -->
+<!-- v1.1 · 2026-05-02 · tras sesión: 01, 02, 02.1 cerrados; 03 pendiente de validación en staging -->
