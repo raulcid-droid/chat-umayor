@@ -1,57 +1,54 @@
-# PLAN — Auditoría inicial de `chat_umayor` (rol backend)
+# PLAN — Roadmap backend `chat_umayor`
 
 ## Objetivo
-Entender qué existe, contrastar con el `AGENTS.md`, producir roadmap backend.
-**Solo lectura.**
+Entregar el módulo `chat_umayor` instalable y funcional (rol backend) en
+sub-planes atómicos. Cada fila es un `PLAN.md` independiente: **1 commit
+o 1 tanda de commits atómicos**, con tests cuando aplique (§5 AGENTS global).
 
 ## Alcance
-- ✅ Leer archivos, listar directorios, `git status`, `git log`.
-- ✅ Revisar **todo** el repo para tener contexto, aunque luego solo edite lo mío.
-- ❌ No `ruff`, no instalar, no tests, no editar nada.
+Todo lo declarado como "mío" en §2 y §5 del `AGENTS.md` del repo:
+modelos, services, controllers, data, security, tests y `docs/api.md`.
+**No toco** `views/`, `static/`, ni QWeb/OWL/CSS.
 
-## Pasos
+## Roadmap
 
-### 1. Inventario
-- `tree chat_umayor/` o `ls -R chat_umayor/`.
-- `git status` + `git log --oneline -15`.
+| #  | Estado | PLAN | Entregable |
+|----|--------|------|------------|
+| 01 | ✅ 2026-05-02 | Reconciliar `AGENTS.md` (path real `chat_umayor/` en raíz) + commitear docs locales | 2 commits `docs:` |
+| 02 | ✅ 2026-05-02 | `docs/api.md v0` — contrato de los 4 endpoints (request/response/errores) **sin implementar** — desbloquea a UI | 1 commit `docs:` |
+| 03 | ⏳ siguiente   | Módulo instalable end-to-end mínimo: controller `/chatbot` con respuesta placeholder JSON + cadena de imports (`__init__.py` raíz → `controllers/`) | 1 commit `feat:` + test smoke |
+| 04 |               | Modelo `chatbot.session` con FSM (estados §6 AGENTS), transiciones `_transition_to_*`, ACL en `ir.model.access.csv` | 1 commit `feat:` + `test_session_fsm.py` (RED→GREEN) |
+| 05 |               | Modelo `chatbot.message` + `_sanitize_for_llm()` + ACL + tests de sanitización | 1 commit `feat:` |
+| 06 |               | `services/gemini_client.py`: wrapper `google-genai` con `ir.config_parameter` (`chat_umayor.gemini_api_key`, `chat_umayor.system_prompt`), reintentos, fallbacks §7 AGENTS, **tests con mock** | 1 commit `feat:` + `test_gemini_client.py`. Elegir modelo Flash y registrarlo aquí. |
+| 07 |               | Endpoints reales: implementar los 4 endpoints del `docs/api.md`, conectar session + message + gemini; bump `docs/api.md` a `v1` | 1 commit `feat:` + `docs:` |
+| 08 |               | Productos SOAP + Depósito a Plazo: `data/products.xml` + cálculos (prima SOAP, interés depósito) en el modelo del producto | 1 commit `feat:` + tests de cálculo |
+| 09 |               | Modelo `chatbot.contract` + vínculo a `sign.request`. Agregar `sign` a `depends` (**coordinar con UI antes**), método `_launch_signature`, callback | 1 commit `feat:` + `test_contract.py` |
+| 10 |               | `i18n/es.po` + README entrega académica (cómo instalar, demo, arquitectura) | 1 commit `docs:` + `chore:` |
 
-### 2. Lectura (todos los archivos del repo)
-- `chat_umayor/__manifest__.py` → `depends`, `data`, `assets`, versión.
-- `chat_umayor/__init__.py` → qué subpaquetes importa.
-- `chat_umayor/controllers/main.py` → rutas, `auth`, si hay llamada a Gemini desde aquí.
-- `chat_umayor/views/assets.xml` → qué JS/CSS carga (solo informativo, no lo toco).
-- `chat_umayor/static/src/js/chatbot.js` → si ya hay lógica de chat o llamadas HTTP (informativo).
-- `chat_umayor/static/src/css/chatbot.css` → ojeada.
-- `README.md` → contexto y entregables declarados.
+## Reglas operativas
 
-### 3. Detección de ausencias (mi trabajo)
-¿Existen?
-- `chat_umayor/models/` y su `__init__.py`.
-- `chat_umayor/services/gemini_client.py`.
-- `chat_umayor/security/ir.model.access.csv`.
-- `chat_umayor/data/` (productos, prompt).
-- `chat_umayor/tests/`.
-- `docs/api.md` con el contrato backend↔frontend.
+- **Un PLAN a la vez**. Antes de empezar cada fila escribo un `PLAN.md`
+  detallado en formato §3 AGENTS global (objetivo, archivos, pasos,
+  riesgos, rollback) y pido "ok".
+- **Tests**: TDD ligero (§5 AGENTS global) en todo código no trivial.
+  RED → GREEN → REFACTOR.
+- **Coordinación con UI**: antes de tocar el `__manifest__.py` (agregar
+  `sign`, `mail`) y antes de hacer cambios que impacten `docs/api.md`,
+  aviso en el chat del equipo.
+- **Push**: lo hace el humano (Jonathan), no yo.
 
-### 4. Preguntas a responder
-1. ¿El módulo se instala en Odoo 19 según el `__manifest__.py`? (solo inferir).
-2. ¿Dónde vive hoy la lógica del chat — frontend, backend, ambos, ninguno?
-3. ¿Hay llamada a Gemini? ¿Desde JS (🔴 inseguro) o desde Python?
-4. ¿Hay **secretos hardcoded**? Buscar `API_KEY`, `sk-`, `AIza` en todo el repo.
-5. ¿`__manifest__.py` depende ya de `sign`? ¿De `website`?
-6. ¿Hay señales de un **contrato de API** acordado con el compañero de UI? Si no, hay que proponerlo.
+## Riesgos globales
 
-## Entregable
-Mensaje en el chat con tres bloques:
+- Cambios del profesor en requisitos (país SOAP, campos obligatorios) →
+  mitigado porque los TBDs están explícitos en `docs/api.md §5`.
+- Desalineación con UI si implemento endpoints distintos al doc →
+  mitigado porque `docs/api.md` es fuente de verdad y bumpea en el
+  mismo commit que el controller (regla §10.6 AGENTS).
+- Secretos (Gemini API key) → solo en `ir.config_parameter`, nunca en
+  código, XML de datos, ni commits (§7 AGENTS + §14 AGENTS global).
 
-- **✅ Implementado** — qué hay, quién lo hizo (backend/frontend).
-- **❌ Falta / roto (mi área)** — con severidad 🔴 crítico / 🟡 importante / 🟢 menor.
-- **🛣️ Roadmap backend** — lista ordenada de próximos `PLAN.md`, cada uno con 1 objetivo atómico. Esperable: (1) alinear `__manifest__.py`, (2) crear modelos base + FSM, (3) wrapper Gemini, (4) endpoints + `docs/api.md`, (5) integración Sign, (6) tests.
+## Rollback global
+Cada PLAN es 1 commit atómico (o tanda pequeña): `git revert <sha>` o
+`git reset --hard <sha-anterior>` si todavía no hay push.
 
-## Riesgos
-Ninguno — solo lectura.
-
-## Rollback
-N/A.
-
-<!-- v0.2 · 2026-05-02 · ajustado para rol backend -->
+<!-- v1.0 · 2026-05-02 · reemplaza el PLAN de auditoría por el roadmap de desarrollo -->
