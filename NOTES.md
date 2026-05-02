@@ -1,21 +1,45 @@
 # NOTES.md — Estado del proyecto chat_umayor
 
-## Sesión 2026-05-02: Reinicio de plan - nuevo roadmap generado, enfocado en backend
+## Sesión 2026-05-02: Reinicio de plan + arranque backend
 
-### Progreso de la sesión
-- ✅ **PLAN 01** cerrado: `AGENTS.md` reconciliado (path real `chat_umayor/` en raíz) + commits de `AGENTS.md`, `NOTES.md`, `PLAN.md` locales.
+### Resumen ejecutivo
+Sesión larga con tres planes cerrados y un cuarto pendiente de validación
+en staging. El módulo pasa de ser un esqueleto vacío a tener su primer
+endpoint HTTP funcional y un contrato de API consensuable con UI.
+
+### Logros
+- ✅ **PLAN 01**: `AGENTS.md` reconciliado (path real `chat_umayor/` en raíz). Docs locales bajo control de versiones.
   - `c6877d3 docs(agents): add real module path at repo root`
   - `4268aa2 docs: add local AGENTS, NOTES and PLAN working notes`
-- ✅ **PLAN 02** cerrado: `docs/api.md v0` con los 4 endpoints, catálogo de 8 errores, 6 TBDs explícitos.
+- ✅ **PLAN 02**: `docs/api.md v0` — contrato formal de los 4 endpoints, catálogo de 8 errores, 6 TBDs explícitos.
   - `d8e1c2d docs(api): add v0 draft of backend-frontend contract`
-- 🔄 **`PLAN.md` sobrescrito** con el roadmap de desarrollo (10 sub-planes) reemplazando el plan de auditoría inicial.
+- 🔄 `PLAN.md` sobrescrito: pasó de plan de auditoría a roadmap de desarrollo (10 filas).
+  - `afff850 docs(plan): replace audit plan with backend dev roadmap`
+  - `11ab0eb docs(notes): log 2026-05-02 session progress and plan reset`
+- ✅ **PLAN 02.1**: `docs/api.md v0.1` — transporte clarificado como **JSON-RPC 2.0 nativo de Odoo** (no REST plano). Cierra TBD de CSRF.
+  - `c988a38 docs(api): clarify JSON-RPC transport in v0.1`
+- 🟡 **PLAN 03** (código escrito, pendiente validar en Odoo.sh staging): endpoint `/chat_umayor/ping` + cadena de imports + `TestSmokePing`.
+  - `a219e27 feat(controllers): add health ping endpoint and smoke test`
+
+### Decisiones técnicas clave
+- **Transporte**: JSON-RPC 2.0 nativo de Odoo (`type='json'`), no REST plano. Razón: idiomático en Odoo 19, CSRF gestionado automáticamente, la UI puede usar el helper `rpc` de Odoo sin boilerplate.
+- **Shape interno**: dentro del `result` del JSON-RPC seguimos usando `{ok, data|error}` con catálogo de códigos de error tipado.
+- **Tests**: `HttpCase` + tags `chat_umayor`, `post_install`. Odoo auto-descubre `tests/` — **no** importarlo desde `__init__.py` raíz.
+
+### En qué quedamos
+- Jonathan va a **validar PLAN 03 en Odoo.sh staging** y trae resultado mañana.
+- Comando de validación: `./odoo-bin --addons-path=addons,. -d chatbot_test --test-enable --stop-after-init -i chat_umayor --test-tags=/chat_umayor`.
+- Puntos de fallo probables si algo explota: signatura de `HttpCase.url_open` en Odoo 19, o manejo de `type='json'` en el test. Si falla, traer traceback.
+- Mientras no haya green en staging, **no avanzar a PLAN 04**.
 
 ### Acuerdos operativos
-- Los `git push` los hace Jonathan, no el agente.
+- Los `git push` los hace Jonathan (ya pusheó todos los commits de esta sesión).
 - Cada fila del roadmap es un `PLAN.md` atómico nuevo, consensuado antes de ejecutar.
 
-### Pendiente inmediato
-- **PLAN 03**: módulo instalable end-to-end mínimo (controller `/chatbot` placeholder + cadena de imports + test smoke). Esperar "ok".
+### Pendiente inmediato (mañana)
+1. Confirmar resultado de validación de PLAN 03 en staging.
+2. Si green → arrancar **PLAN 04**: modelo `chatbot.session` con FSM + ACL + tests RED→GREEN.
+3. Si red → fix sobre PLAN 03 antes de seguir.
 
 ---
 
