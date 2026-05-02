@@ -1,5 +1,25 @@
 # NOTES.md — Estado del proyecto chat_umayor
 
+## Sesión 2026-05-02: Reinicio de plan - nuevo roadmap generado, enfocado en backend
+
+### Progreso de la sesión
+- ✅ **PLAN 01** cerrado: `AGENTS.md` reconciliado (path real `chat_umayor/` en raíz) + commits de `AGENTS.md`, `NOTES.md`, `PLAN.md` locales.
+  - `c6877d3 docs(agents): add real module path at repo root`
+  - `4268aa2 docs: add local AGENTS, NOTES and PLAN working notes`
+- ✅ **PLAN 02** cerrado: `docs/api.md v0` con los 4 endpoints, catálogo de 8 errores, 6 TBDs explícitos.
+  - `d8e1c2d docs(api): add v0 draft of backend-frontend contract`
+- 🔄 **`PLAN.md` sobrescrito** con el roadmap de desarrollo (10 sub-planes) reemplazando el plan de auditoría inicial.
+
+### Acuerdos operativos
+- Los `git push` los hace Jonathan, no el agente.
+- Cada fila del roadmap es un `PLAN.md` atómico nuevo, consensuado antes de ejecutar.
+
+### Pendiente inmediato
+- **PLAN 03**: módulo instalable end-to-end mínimo (controller `/chatbot` placeholder + cadena de imports + test smoke). Esperar "ok".
+
+---
+
+
 ## Ruta de trabajo
 `~/Proyectos/chatbot_bancario/chat-umayor/`
 
