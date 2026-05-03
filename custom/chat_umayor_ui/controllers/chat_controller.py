@@ -77,7 +77,15 @@ class ChatUMayorController(http.Controller):
 
         session = Session.search([('token', '=', token)], limit=1)
         if not session:
-            return {'error': 'sesion_no_encontrada'}
+            # Recuperación automática: si el token del navegador apunta a una
+            # sesión que ya no existe (BD reseteada, sesión purgada, etc.)
+            # creamos una sesión nueva y devolvemos el token actualizado para
+            # que el frontend lo guarde. Esto evita errores molestos al usuario
+            # final y es parte del QA del Punto 6 (resiliencia del bot).
+            session = Session.create({
+                'state': 'active',
+                'token': token,  # Reutilizamos el token que ya tenía el navegador
+            })
 
         # 1) Guardar mensaje del usuario
         Message.create({
