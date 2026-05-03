@@ -76,7 +76,6 @@
                 <filter string="Activas" name="filter_active" domain="[('state','=','active')]"/>
                 <filter string="Esperando firma" name="filter_sign" domain="[('state','=','awaiting_signature')]"/>
                 <filter string="Completadas" name="filter_done" domain="[('state','=','completed')]"/>
-                <filter string="Lentas (&gt;5s)" name="filter_slow" domain="[('response_avg_ms','&gt;',5000)]"/>
                 <group expand="0" string="Agrupar por">
                     <filter string="Estado" name="group_state" context="{'group_by': 'state'}"/>
                     <filter string="Producto" name="group_product" context="{'group_by': 'product_id'}"/>
