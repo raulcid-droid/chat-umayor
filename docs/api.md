@@ -1,8 +1,8 @@
 # API `chat_umayor` — contrato backend ↔ frontend
 
-- **Versión**: `v0.1` (draft · propuesta unilateral del backend).
+- **Versión**: `v0.2` (draft · propuesta unilateral del backend).
 - **Estado**: pendiente de validación con la compañera de UI.
-- **Fecha**: 2026-05-02.
+- **Fecha**: 2026-05-03.
 - **Fuente de verdad**: este documento. Cualquier cambio en endpoints se
   refleja aquí **en el mismo commit** que toca `controllers/main.py`
   (regla §10.6 de `AGENTS.md`).
@@ -16,11 +16,11 @@
 ## 1. Convenciones
 
 ### Transporte
-- **JSON-RPC 2.0 nativo de Odoo** sobre `http.Controller` con `type='json'`.
+- **JSON-RPC 2.0 nativo de Odoo** sobre `http.Controller` con `type='jsonrpc'`.
   Es el patrón idíomatico en Odoo 19 y el widget OWL de UI puede usar el
   cliente `rpc` de Odoo sin código extra.
 - Todos los endpoints aceptan y devuelven **JSON UTF-8**.
-- Método: **`POST`** siempre (obligatorio para `type='json'`).
+- Método: **`POST`** siempre (obligatorio para `type='jsonrpc'`).
 - Base URL: raíz del website Odoo. Prefijo fijo **`/chat_umayor/`**
   (alineado con §6 de `AGENTS.md`).
 
@@ -57,7 +57,7 @@ helper `rpc` de `@web/core/network/rpc`.
 - `auth='public'` en los 4 endpoints (el chatbot atiende visitantes anónimos).
 - La identidad de la conversación se lleva por **`session_id` en la URL**,
   no por cookie. Es el id de un registro `chatbot.session` en BD.
-- CSRF: gestionado por Odoo automáticamente en `type='json'` (no hace
+- CSRF: gestionado por Odoo automáticamente en `type='jsonrpc'` (no hace
   falta `csrf=False` ni tokens manuales). Esto resuelve el TBD §5.1 de `v0`.
 
 ### Formato de `result` (shape de negocio)
@@ -322,7 +322,7 @@ Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si
 
 ## 5. TBD / preguntas abiertas
 
-1. ~~**CSRF en JSON públicos**~~ → resuelto en `v0.1`: Odoo lo gestiona en `type='json'`.
+1. ~~**CSRF en JSON públicos**~~ → resuelto en `v0.1`: Odoo lo gestiona en `type='jsonrpc'`.
 2. **Formato de `document_id`**: depende de qué país se use para SOAP (AGENTS §1 dice "confirmar con el profesor"). Por ahora aceptamos string libre y validamos en backend.
 3. **Polling de estado post-firma**: ¿endpoint dedicado `GET /state` o incluir el estado de firma en la próxima respuesta de `/message`?
 4. **Rate limiting**: no contemplado en `v0.1`. Ante abuso del endpoint `/message`, el wrapper de Gemini ya tiene backoff (§7 AGENTS) pero no hay protección por IP.
@@ -333,9 +333,13 @@ Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si
 
 ## 6. Changelog
 
+- **v0.2** (2026-05-03): rename `type='json'` → `type='jsonrpc'`. Desde
+  Odoo 19.0 el primero es un alias deprecado del segundo. Sin cambios
+  en payloads ni envoltorio JSON-RPC: solo el nombre del `type` en el
+  decorador `@route` del backend.
 - **v0.1** (2026-05-02): aclara transporte como JSON-RPC 2.0 nativo de
   Odoo (no REST plano). Documenta envoltorio `params`/`result`. Cierra
   TBD de CSRF.
 - **v0** (2026-05-02): primer draft tras PLAN 02. Sin implementación aún.
 
-<!-- v0.1 · 2026-05-02 · transporte clarificado: JSON-RPC Odoo nativo -->
+<!-- v0.2 · 2026-05-03 · rename type='json' → 'jsonrpc' (alias deprecado en Odoo 19) -->
