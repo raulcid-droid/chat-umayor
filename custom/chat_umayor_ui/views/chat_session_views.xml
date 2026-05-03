@@ -69,17 +69,17 @@
         <field name="name">chat.umayor.session.search</field>
         <field name="model">chat.umayor.session</field>
         <field name="arch" type="xml">
-            <search>
+            <search string="Buscar Sesiones">
                 <field name="visitor_name"/>
                 <field name="visitor_email"/>
                 <field name="token"/>
+                <separator/>
                 <filter string="Activas" name="filter_active" domain="[('state','=','active')]"/>
                 <filter string="Esperando firma" name="filter_sign" domain="[('state','=','awaiting_signature')]"/>
                 <filter string="Completadas" name="filter_done" domain="[('state','=','completed')]"/>
-                <group expand="0" string="Agrupar por">
-                    <filter string="Estado" name="group_state" context="{'group_by': 'state'}"/>
-                    <filter string="Producto" name="group_product" context="{'group_by': 'product_id'}"/>
-                </group>
+                <separator/>
+                <filter string="Por estado" name="group_state" context="{'group_by': 'state'}"/>
+                <filter string="Por producto" name="group_product" context="{'group_by': 'product_id'}"/>
             </search>
         </field>
     </record>
