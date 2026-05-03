@@ -2,11 +2,16 @@
 /* =========================================================================
  * chatbot_extras.js
  * -------------------------------------------------------------------------
+ * Extiende el widget de chat con tres capacidades adicionales que define
+ * docs/api.md:
+ *
  *   1. Chips de sugerencias (campo `suggestions` del backend).
  *   2. Formulario de captura de datos (estado `data_collection`).
- *   3. Botón de firma de contrato (estado `review` -> `signing`).
+ *   3. Tarjeta de revisión + botón de firma (estado `review` -> `signing`).
  *
-
+ * Mientras el backend no esté disponible, activa un MODO DEMO que simula
+ * respuestas siguiendo el mismo contrato de la API. Eso permite validar
+ * el flujo completo de UI sin depender del controlador.
  * ========================================================================= */
 
 (function () {
@@ -50,7 +55,7 @@
       return;
     }
 
-    console.log("[chatbot_extras] Inicializado por Romina Beca");
+    console.log("[chatbot_extras] inicializado");
 
     // Interceptamos el botón de enviar para usar nuestros endpoints
     // (en modo demo o real). El interceptor también dispara la
@@ -173,7 +178,10 @@
         renderDataForm(data.product_code || detectProduct(data.reply));
       }
       if (data.state === "review") {
-        renderSignButton();
+        // Caso borde: el backend pasó a 'review' por mensaje sin
+        // pasar por submit_data. Mostramos la tarjeta con lo que
+        // haya en la respuesta (typically vacía en este path).
+        renderReviewCard({}, data.summary || {});
       }
     } else {
       const errMsg =
@@ -375,15 +383,17 @@
     }
 
     if (response && response.ok && response.data) {
-      // Quitamos el formulario y mostramos resumen
+      // Quitamos el formulario y mostramos un mensaje de confirmación
       form.remove();
       const summary = response.data.summary || {};
-      const text = `✓ Datos recibidos. ${summary.product_name || ""} a nombre de ${summary.partner_name || ""}.`;
+      const text = `✓ Datos recibidos. Revisa el resumen antes de firmar.`;
       appendMessage(text, "bot");
 
       sessionState.currentState = response.data.state || "review";
       if (sessionState.currentState === "review") {
-        renderSignButton();
+        // Pasamos tanto el payload (lo que envió el usuario) como
+        // el summary (lo que devolvió el backend con cálculos).
+        renderReviewCard(payload, summary);
       }
     } else {
       const errMsg =
@@ -396,12 +406,125 @@
     }
   }
 
-  function renderSignButton() {
+  /**
+   * Renderiza la TARJETA DE REVISIÓN antes de firmar.
+   *
+   * Muestra al usuario un resumen claro del contrato (cliente + producto +
+   * cálculos) con un checkbox de "He revisado y acepto" que habilita el
+   * botón de firma. Esto es el patrón estándar en banca digital — nunca
+   * se firma un contrato sin que el cliente revise expresamente.
+   *
+   * @param {Object} payload - lo que el usuario envió en submit_data
+   * @param {Object} summary - lo que el backend devolvió con cálculos
+   */
+  function renderReviewCard(payload, summary) {
     const msgsEl = document.getElementById("chatbot-messages");
     const wrap = document.createElement("div");
-    wrap.className = "cu-extras cu-sign";
+    wrap.className = "cu-extras cu-review";
+
+    const partner = (payload && payload.partner) || {};
+    const productData = (payload && payload.product_data) || {};
+    const isSoap = (payload && payload.product_code) === "soap";
+    const productName =
+      summary.product_name || (isSoap ? "SOAP" : "Depósito a Plazo");
+
+    // Detalle específico del producto
+    let productDetailHtml = "";
+    if (isSoap) {
+      productDetailHtml = `
+                <div class="cu-review-row">
+                    <span class="cu-review-label">Patente</span>
+                    <span class="cu-review-value">${escapeHtml(productData.vehicle_plate || "—")}</span>
+                </div>
+                <div class="cu-review-row">
+                    <span class="cu-review-label">Año vehículo</span>
+                    <span class="cu-review-value">${escapeHtml(String(productData.vehicle_year || "—"))}</span>
+                </div>
+            `;
+    } else {
+      productDetailHtml = `
+                <div class="cu-review-row">
+                    <span class="cu-review-label">Monto</span>
+                    <span class="cu-review-value">${formatCLP(productData.amount)}</span>
+                </div>
+                <div class="cu-review-row">
+                    <span class="cu-review-label">Plazo</span>
+                    <span class="cu-review-value">${escapeHtml(String(productData.term_days || "—"))} días</span>
+                </div>
+            `;
+    }
+
+    // Cálculo destacado (prima SOAP o intereses depósito)
+    let calcHtml = "";
+    const calc = summary.calculated || {};
+    if (isSoap && calc.premium != null) {
+      calcHtml = `
+                <div class="cu-review-highlight">
+                    <span class="cu-review-highlight-label">Prima a pagar</span>
+                    <span class="cu-review-highlight-value">${formatCLP(calc.premium)}</span>
+                </div>
+            `;
+    } else if (!isSoap && calc.interest != null) {
+      calcHtml = `
+                <div class="cu-review-highlight">
+                    <span class="cu-review-highlight-label">Intereses estimados</span>
+                    <span class="cu-review-highlight-value">${formatCLP(calc.interest)}</span>
+                </div>
+            `;
+    }
+
     wrap.innerHTML = `
-            <button type="button" class="cu-sign-btn">
+            <div class="cu-review-header">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="#1a73e8"
+                     style="vertical-align: middle; margin-right: 6px">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 7V3.5L18.5 9H13z"/>
+                </svg>
+                <span class="cu-review-title">Resumen del contrato</span>
+            </div>
+
+            <div class="cu-review-section">
+                <div class="cu-review-section-title">Producto</div>
+                <div class="cu-review-row">
+                    <span class="cu-review-label">Producto</span>
+                    <span class="cu-review-value">${escapeHtml(productName)}</span>
+                </div>
+                ${productDetailHtml}
+            </div>
+
+            <div class="cu-review-section">
+                <div class="cu-review-section-title">Cliente</div>
+                <div class="cu-review-row">
+                    <span class="cu-review-label">Nombre</span>
+                    <span class="cu-review-value">${escapeHtml(partner.name || "—")}</span>
+                </div>
+                <div class="cu-review-row">
+                    <span class="cu-review-label">RUT</span>
+                    <span class="cu-review-value">${escapeHtml(partner.document_id || "—")}</span>
+                </div>
+                <div class="cu-review-row">
+                    <span class="cu-review-label">Email</span>
+                    <span class="cu-review-value">${escapeHtml(partner.email || "—")}</span>
+                </div>
+                ${
+                  partner.phone
+                    ? `
+                    <div class="cu-review-row">
+                        <span class="cu-review-label">Teléfono</span>
+                        <span class="cu-review-value">${escapeHtml(partner.phone)}</span>
+                    </div>
+                `
+                    : ""
+                }
+            </div>
+
+            ${calcHtml}
+
+            <label class="cu-review-accept">
+                <input type="checkbox" class="cu-review-checkbox" />
+                <span>He revisado los datos y acepto los términos del contrato.</span>
+            </label>
+
+            <button type="button" class="cu-sign-btn" disabled="disabled">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
                      style="vertical-align: middle; margin-right: 6px">
                     <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
@@ -410,14 +533,30 @@
             </button>
             <p class="cu-sign-help">Te abriremos el documento en una pestaña segura.</p>
         `;
-    wrap.querySelector(".cu-sign-btn").addEventListener("click", launchSign);
+
+    // Habilitar el botón de firma solo cuando el checkbox esté marcado
+    const checkbox = wrap.querySelector(".cu-review-checkbox");
+    const signBtn = wrap.querySelector(".cu-sign-btn");
+    checkbox.addEventListener("change", () => {
+      signBtn.disabled = !checkbox.checked;
+    });
+    signBtn.addEventListener("click", launchSign);
+
     msgsEl.appendChild(wrap);
     msgsEl.scrollTop = msgsEl.scrollHeight;
   }
 
   async function launchSign() {
-    const wrap = document.querySelector(".cu-sign");
-    if (wrap) wrap.querySelector(".cu-sign-btn").disabled = true;
+    const wrap =
+      document.querySelector(".cu-review") ||
+      document.querySelector(".cu-sign");
+    if (wrap) {
+      const btn = wrap.querySelector(".cu-sign-btn");
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Procesando...";
+      }
+    }
 
     let response;
     try {
@@ -442,7 +581,20 @@
         (response && response.error && response.error.message) ||
         "No se pudo iniciar la firma.";
       appendMessage(errMsg, "bot");
-      if (wrap) wrap.querySelector(".cu-sign-btn").disabled = false;
+      if (wrap) {
+        const btn = wrap.querySelector(".cu-sign-btn");
+        if (btn) {
+          btn.disabled = false;
+          // Restauramos el contenido original (icono + texto)
+          btn.innerHTML = `
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
+                             style="vertical-align: middle; margin-right: 6px">
+                            <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+                        </svg>
+                        Firmar contrato
+                    `;
+        }
+      }
     }
   }
 
@@ -663,6 +815,34 @@
   // ---------------------------------------------------------------
   // Helpers DOM
   // ---------------------------------------------------------------
+  /**
+   * Escapa caracteres HTML peligrosos. Lo usamos cuando insertamos
+   * datos del usuario dentro de innerHTML (en la tarjeta de revisión).
+   * Sin esto, alguien podría meter <script> en el formulario y atacarnos.
+   */
+  function escapeHtml(str) {
+    if (str == null) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  /**
+   * Formatea un número como pesos chilenos.
+   * 1500000 -> "$1.500.000 CLP"
+   */
+  function formatCLP(amount) {
+    if (amount == null || isNaN(amount)) return "—";
+    const formatted = new Intl.NumberFormat("es-CL", {
+      style: "currency",
+      currency: "CLP",
+      maximumFractionDigits: 0,
+    }).format(amount);
+    return formatted;
+  }
   function appendMessage(text, from) {
     const msgsEl = document.getElementById("chatbot-messages");
     const div = document.createElement("div");

@@ -13,6 +13,8 @@
  *   3. Pegar el contenido de este archivo en la consola.
  *   4. Ejecutar: ChatbotTests.runAll()
  *
+ * Cubre la validación de viabilidad: SLA <5s por respuesta, accesibilidad,
+ * resistencia a XSS y validación de RUT.
  * ========================================================================= */
 
 (function () {
@@ -345,20 +347,8 @@
   async function runAll() {
     results.length = 0;
     console.log(
-      "%c╔═══════════════════════════════════════════╗",
-      "color: #1a73e8; font-weight: bold",
-    );
-    console.log(
-      "%c║  CHATBOT UMAYOR — SUITE DE PRUEBAS UI    ║",
-      "color: #1a73e8; font-weight: bold",
-    );
-    console.log(
-      "%c║  Autora: Romina Beca                      ║",
-      "color: #1a73e8; font-weight: bold",
-    );
-    console.log(
-      "%c╚═══════════════════════════════════════════╝",
-      "color: #1a73e8; font-weight: bold",
+      "%c--- Suite de pruebas frontend chatbot ---",
+      "color: #1a73e8; font-weight: bold; font-size: 13px",
     );
     console.log("");
 
