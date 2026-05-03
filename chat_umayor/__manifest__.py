@@ -10,6 +10,7 @@
     ],
     'assets': {
         'web.assets_frontend': [
+            'chat_umayor/static/src/xml/chatbot.xml',
             'chat_umayor/static/src/css/chatbot.css',
             'chat_umayor/static/src/js/chatbot.js',
         ],
