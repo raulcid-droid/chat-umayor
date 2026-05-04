@@ -6,6 +6,7 @@
     'category': 'Website',
     'depends': ['website'],
     'data': [
+        'security/ir.model.access.csv',
         'views/assets.xml',
     ],
     'assets': {
