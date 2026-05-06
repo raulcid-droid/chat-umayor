@@ -75,6 +75,14 @@ class ChatbotSession(models.Model):
         help="Producto elegido por el cliente en la fase de descubrimiento.",
     )
 
+    message_ids = fields.One2many(
+        comodel_name="chatbot.message",
+        inverse_name="session_id",
+        string="Mensajes",
+        help="Historial de mensajes de la conversación, ordenado "
+        "cronológicamente.",
+    )
+
     # ------------------------------------------------------------------
     # Motor genérico del FSM
     # ------------------------------------------------------------------
