@@ -18,6 +18,8 @@ El modelo es el único responsable del FSM: ni el controller ni Gemini
 deben setear ``state`` directamente.
 """
 
+import unicodedata
+
 from odoo import _, fields, models
 from odoo.exceptions import UserError
 
@@ -27,6 +29,20 @@ class ChatbotSession(models.Model):
 
     _name = "chatbot.session"
     _description = "Chatbot Session"
+
+    # Saludo inicial que se registra como primer ``chatbot.message``
+    # (rol ``assistant``) al crear la sesión vía ``_create_with_greeting``.
+    # El front lo muestra tal cual sin llamar a ``/message`` primero.
+    _GREETING = (
+        "Hola, soy el asistente virtual de Banco UMayor. "
+        "Puedo ayudarte a contratar un SOAP o un Depósito a Plazo. "
+        "¿Qué te interesa?"
+    )
+
+    # Número máximo de mensajes que ``_get_last_n`` devuelve por defecto.
+    # Coincide con el N=10 documentado en §7 AGENTS local ("Envío de
+    # contexto").
+    _DEFAULT_HISTORY_LIMIT = 10
 
     # Mapa único de transiciones permitidas. Fuente de verdad del FSM.
     # Forma: {estado_actual: (estados_destino_permitidos, ...)}.
@@ -147,3 +163,132 @@ class ChatbotSession(models.Model):
     def _transition_to_closed(self) -> None:
         """Transiciona a ``closed`` (estado terminal)."""
         self._do_transition("closed")
+
+    # ------------------------------------------------------------------
+    # Helpers de historial para el wrapper Gemini
+    # ------------------------------------------------------------------
+
+    def _get_last_n(self, n: int | None = None) -> list[dict]:
+        """Devuelve los últimos ``n`` mensajes saneados para el LLM.
+
+        El historial se entrega en orden cronológico ascendente (el
+        ``_order`` del modelo ``chatbot.message`` ya lo garantiza).
+        Cada ``content`` pasa por ``chatbot.message._sanitize_for_llm()``
+        antes de salir del modelo, para que el wrapper de Gemini no
+        tenga que conocer reglas de PII.
+
+        Args:
+            n: Límite de mensajes (los más recientes). ``None`` usa
+                ``_DEFAULT_HISTORY_LIMIT`` (10, §7 AGENTS).
+
+        Returns:
+            Lista de dicts ``{"role": ..., "content": ...}`` en orden
+            cronológico. Vacía si la sesión no tiene mensajes.
+        """
+        self.ensure_one()
+        limit = self._DEFAULT_HISTORY_LIMIT if n is None else n
+        messages = self.message_ids
+        # ``messages`` ya viene ordenado asc por ``_order``; para
+        # quedarnos con los últimos N recortamos desde el final.
+        if limit is not None and len(messages) > limit:
+            messages = messages[-limit:]
+        return [
+            {"role": msg.role, "content": msg._sanitize_for_llm()}
+            for msg in messages
+        ]
+
+    # ------------------------------------------------------------------
+    # Factory con greeting
+    # ------------------------------------------------------------------
+
+    def _create_with_greeting(self) -> "ChatbotSession":
+        """Crea una sesión nueva y registra el saludo inicial.
+
+        El saludo (``_GREETING``) se persiste como primer
+        ``chatbot.message`` con ``role='assistant'`` para que quede en
+        el historial y aparezca en la UI sin depender de una llamada
+        extra a ``/message``.
+
+        Returns:
+            El recordset de la sesión recién creada.
+        """
+        session = self.sudo().create({})
+        self.env["chatbot.message"].sudo().create(
+            {
+                "session_id": session.id,
+                "role": "assistant",
+                "content": self._GREETING,
+            }
+        )
+        return session
+
+    # ------------------------------------------------------------------
+    # Clasificación de intención (heurística server-side)
+    # ------------------------------------------------------------------
+
+    # Palabras clave por estado. ``_classify_intent`` las busca tras
+    # normalizar a minúsculas y quitar acentos. Limitación conocida:
+    # heurística frágil ante sinónimos o errores ortográficos; se
+    # reemplaza en PLAN 08 por respuesta estructurada de Gemini (JSON).
+    _INTENT_KEYWORDS_DISCOVERY_SOAP = ("soap", "seguro obligatorio")
+    _INTENT_KEYWORDS_DISCOVERY_DEPOSIT = ("deposito", "plazo", "ahorro")
+    _INTENT_KEYWORDS_CONFIRM = ("si", "quiero", "contratar", "confirmo", "ok", "dale")
+    _INTENT_KEYWORDS_CHANGE = ("otro", "cambiar", "cambio")
+    _INTENT_KEYWORDS_NEGATION = ("no ", "no,", "nunca", "tampoco")
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """Pasa a minúsculas y quita acentos (NFD + drop combining).
+
+        Uso interno de ``_classify_intent``.
+        """
+        if not text:
+            return ""
+        lower = text.strip().lower()
+        nfd = unicodedata.normalize("NFD", lower)
+        return "".join(ch for ch in nfd if not unicodedata.combining(ch))
+
+    @classmethod
+    def _classify_intent(cls, state: str, text: str) -> str | None:
+        """Devuelve el estado destino sugerido por el mensaje del usuario.
+
+        Heurística de keywords (normalizadas, sin acentos). Ver tabla
+        D2 de PLAN 07. Es una **función pura**: no toca ORM ni tiene
+        efectos. Si no hay transición clara, devuelve ``None``.
+
+        Args:
+            state: Estado actual de la sesión.
+            text: Texto crudo del usuario.
+
+        Returns:
+            Estado destino (``"discovery"``, ``"product_info"``,
+            ``"data_collection"``) o ``None`` si no hay que transicionar.
+        """
+        normalized = cls._normalize(text)
+        if not normalized:
+            return None
+
+        # ``greeting``: cualquier mensaje no vacío abre la conversación.
+        if state == "greeting":
+            return "discovery"
+
+        if state == "discovery":
+            if any(k in normalized for k in cls._INTENT_KEYWORDS_DISCOVERY_SOAP):
+                return "product_info"
+            if any(k in normalized for k in cls._INTENT_KEYWORDS_DISCOVERY_DEPOSIT):
+                return "product_info"
+            return None
+
+        if state == "product_info":
+            # Negación tiene prioridad: "no quiero" no confirma aunque
+            # contenga "quiero".
+            if any(k in normalized for k in cls._INTENT_KEYWORDS_NEGATION):
+                return None
+            if any(k in normalized for k in cls._INTENT_KEYWORDS_CHANGE):
+                return "discovery"
+            if any(k in normalized for k in cls._INTENT_KEYWORDS_CONFIRM):
+                return "data_collection"
+            return None
+
+        # data_collection, review, signing, closed: no avanzan por chat.
+        return None
