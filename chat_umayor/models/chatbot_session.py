@@ -99,6 +99,13 @@ class ChatbotSession(models.Model):
         "cronológicamente.",
     )
 
+    submit_summary = fields.Text(
+        string="Resumen enviado",
+        help="JSON con product_code, product_data y calculated tal "
+        "como se resolvió en /submit_data. Lo consume /sign (PLAN 09) "
+        "para generar el contrato sin recalcular.",
+    )
+
     # ------------------------------------------------------------------
     # Motor genérico del FSM
     # ------------------------------------------------------------------
@@ -292,6 +299,140 @@ class ChatbotSession(models.Model):
 
         # data_collection, review, signing, closed: no avanzan por chat.
         return None
+
+    # ------------------------------------------------------------------
+    # RUT chileno: normalización y validación módulo 11
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_rut_cl(rut: str) -> str:
+        """Devuelve el RUT en formato canónico ``NNNNNNNN-D``.
+
+        Quita puntos, espacios y guiones; pone el dígito verificador
+        en mayúscula y re-inserta el guion antes del último carácter.
+        No valida; solo normaliza. Para validar ver
+        ``_validate_rut_cl``.
+
+        Args:
+            rut: RUT en cualquier formato (``"12.345.678-5"``,
+                ``"12345678-5"``, ``"123456785"``, ``"12345678k"``).
+
+        Returns:
+            RUT normalizado o string vacío si la entrada es vacía.
+
+        Raises:
+            ValueError: Si el RUT tiene menos de 2 caracteres tras
+                limpiar (no queda ni cuerpo + DV).
+        """
+        if not rut or not isinstance(rut, str):
+            return ""
+        cleaned = (
+            rut.strip()
+            .upper()
+            .replace(".", "")
+            .replace(" ", "")
+            .replace("-", "")
+        )
+        if len(cleaned) < 2:
+            raise ValueError("RUT demasiado corto para normalizar.")
+        return f"{cleaned[:-1]}-{cleaned[-1]}"
+
+    @staticmethod
+    def _validate_rut_cl(rut: str) -> bool:
+        """Valida un RUT chileno con algoritmo módulo 11.
+
+        Acepta el RUT en cualquiera de los 3 formatos habituales
+        (con puntos y guion, con guion solo, o pegado). Normaliza
+        internamente antes de validar.
+
+        Algoritmo:
+            1. Cuerpo = dígitos sin DV; debe ser numérico (7-8 cifras).
+            2. Multiplica cada dígito del cuerpo, de derecha a
+               izquierda, por la serie cíclica ``[2,3,4,5,6,7]``.
+            3. ``dv_calculado = 11 - (suma % 11)``.
+            4. ``11 → "0"``, ``10 → "K"``, resto es el propio dígito.
+            5. Compara con el DV de entrada.
+
+        Args:
+            rut: RUT en cualquier formato.
+
+        Returns:
+            ``True`` si es válido, ``False`` en cualquier otro caso
+            (incluye entrada vacía, DV incorrecto, caracteres raros).
+        """
+        if not rut or not isinstance(rut, str):
+            return False
+        try:
+            normalized = ChatbotSession._normalize_rut_cl(rut)
+        except ValueError:
+            return False
+        body, dv = normalized[:-2], normalized[-1]
+        if not body.isdigit() or len(body) < 7 or len(body) > 8:
+            return False
+
+        multipliers = [2, 3, 4, 5, 6, 7]
+        total = 0
+        for i, digit in enumerate(reversed(body)):
+            total += int(digit) * multipliers[i % len(multipliers)]
+        remainder = 11 - (total % 11)
+        if remainder == 11:
+            expected = "0"
+        elif remainder == 10:
+            expected = "K"
+        else:
+            expected = str(remainder)
+        return dv == expected
+
+    # ------------------------------------------------------------------
+    # Partner idempotente por RUT
+    # ------------------------------------------------------------------
+
+    def _get_or_create_partner(self, partner_data: dict):
+        """Busca ``res.partner`` por ``vat`` o lo crea.
+
+        Idempotente: dos llamadas con el mismo RUT devuelven el mismo
+        registro. Si el partner ya existe, actualiza los campos no
+        vacíos de ``partner_data`` (name, email, phone). No elimina
+        valores: si el nuevo payload no trae ``phone``, conserva el
+        existente.
+
+        Asume que ``partner_data['document_id']`` ya pasó por
+        ``_validate_rut_cl`` (el controller lo valida antes).
+
+        Args:
+            partner_data: Dict con ``name`` (obligatorio),
+                ``document_id`` (obligatorio), ``email`` y ``phone``
+                (opcionales).
+
+        Returns:
+            El recordset ``res.partner`` (1 registro).
+        """
+        rut_norm = self._normalize_rut_cl(partner_data["document_id"])
+        Partner = self.env["res.partner"].sudo()
+        existing = Partner.search([("vat", "=", rut_norm)], limit=1)
+
+        values: dict = {}
+        for key, target in (("name", "name"), ("email", "email"), ("phone", "phone")):
+            val = partner_data.get(key)
+            if val:
+                values[target] = val
+
+        if existing:
+            if values:
+                existing.write(values)
+            return existing
+
+        values["vat"] = rut_norm
+        if "name" not in values:
+            # ``name`` es required en res.partner; si el controller
+            # validó el payload, esto no debería pasar. Fallback
+            # defensivo.
+            values["name"] = rut_norm
+        return Partner.create(values)
+
+    # ------------------------------------------------------------------
+    # Detección de producto (heurística)
+    # ------------------------------------------------------------------
 
     @classmethod
     def _detect_product(cls, text: str) -> str | bool:

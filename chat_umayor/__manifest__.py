@@ -8,6 +8,7 @@
     'data': [
         'security/ir.model.access.csv',
         'data/system_prompt.xml',
+        'data/products.xml',
         'views/assets.xml',
     ],
     'assets': {

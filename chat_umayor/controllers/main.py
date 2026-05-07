@@ -1,13 +1,13 @@
 """Controllers HTTP del módulo ``chat_umayor``.
 
 Expone los endpoints JSON-RPC documentados en ``docs/api.md``.
-Estado en v0.3 (PLAN 07):
+Estado en v0.4 (PLAN 08):
 
 - ``/chat_umayor/ping``                              — smoke check (PLAN 03).
 - ``/chat_umayor/session/new``                       — crea sesión + greeting.
 - ``/chat_umayor/session/<id>/message``              — turno de chat con Gemini.
-- ``/chat_umayor/session/<id>/submit_data``          — **stub** v0.3 (PLAN 08).
-- ``/chat_umayor/session/<id>/sign``                 — **stub** v0.3 (PLAN 09).
+- ``/chat_umayor/session/<id>/submit_data``          — formulario (PLAN 08).
+- ``/chat_umayor/session/<id>/sign``                 — **stub** v0.4 (PLAN 09).
 
 Shape de respuesta (dentro del ``result`` JSON-RPC)::
 
@@ -20,7 +20,9 @@ wrapper Gemini solo genera el texto de respuesta; no interpreta
 intención en esta versión (se migra a JSON estructurado en PLAN 08).
 """
 
+import json
 import logging
+import re
 
 from odoo.exceptions import UserError
 from odoo.http import Controller, request, route
@@ -37,6 +39,19 @@ MODULE_VERSION = "19.0.1.0.0"
 MAX_MESSAGE_LENGTH = 2000
 CANNED_LLM_FALLBACK = (
     "Disculpa, tuve un problema para responder. ¿Podrías intentarlo de nuevo?"
+)
+
+# Límites simples para el formulario (PLAN 08).
+MAX_NAME_LENGTH = 120
+MAX_EMAIL_LENGTH = 254
+MAX_PHONE_LENGTH = 32
+VALID_PRODUCT_CODES = ("soap", "deposit")
+
+# Regex de email básico. No pretende cubrir RFC 5322: solo detecta
+# payloads claramente mal formados. Mismo criterio que la
+# sanitización de ``chatbot.message``.
+_EMAIL_REGEX = re.compile(
+    r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"
 )
 
 
@@ -297,7 +312,88 @@ class ChatUmayorController(Controller):
             return _err("INTERNAL_ERROR", "Ocurrió un problema interno.")
 
     # ------------------------------------------------------------------
-    # /session/<id>/submit_data — STUB en v0.3
+    # Validación del payload de /submit_data
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_submit_payload(
+        product_code: str | None,
+        partner: dict | None,
+        product_data: dict | None,
+    ) -> dict[str, str]:
+        """Valida el payload completo y devuelve todos los errores.
+
+        Shape de salida: dict plano con claves en dot-notation
+        (``partner.email``, ``product_data.amount``, etc.) y valor
+        string en español. Diccionario vacío si todo es válido.
+
+        Si ``product_code`` no es válido, se omiten las validaciones
+        de ``product_data`` (no sabemos qué modelo aplicar). Se
+        siguen validando los campos de ``partner``.
+        """
+        errors: dict[str, str] = {}
+
+        # product_code
+        code_valid = product_code in VALID_PRODUCT_CODES
+        if not code_valid:
+            errors["product_code"] = (
+                "product_code inválido; debe ser 'soap' o 'deposit'."
+            )
+
+        # partner
+        if not isinstance(partner, dict):
+            errors["partner"] = "El objeto 'partner' es obligatorio."
+        else:
+            name = partner.get("name")
+            if not name or not isinstance(name, str) or not name.strip():
+                errors["partner.name"] = "El nombre es obligatorio."
+            elif len(name) > MAX_NAME_LENGTH:
+                errors["partner.name"] = (
+                    f"Máximo {MAX_NAME_LENGTH} caracteres."
+                )
+
+            document_id = partner.get("document_id")
+            if not document_id or not isinstance(document_id, str):
+                errors["partner.document_id"] = "El RUT es obligatorio."
+            else:
+                Session = request.env["chatbot.session"].sudo()
+                if not Session._validate_rut_cl(document_id):
+                    errors["partner.document_id"] = (
+                        "RUT inválido (dígito verificador incorrecto)."
+                    )
+
+            email = partner.get("email")
+            if not email or not isinstance(email, str):
+                errors["partner.email"] = "El email es obligatorio."
+            elif len(email) > MAX_EMAIL_LENGTH or not _EMAIL_REGEX.match(email):
+                errors["partner.email"] = "Email con formato inválido."
+
+            phone = partner.get("phone")
+            if phone is not None:
+                if not isinstance(phone, str) or len(phone) > MAX_PHONE_LENGTH:
+                    errors["partner.phone"] = (
+                        f"Teléfono inválido (máximo {MAX_PHONE_LENGTH} caracteres)."
+                    )
+
+        # product_data: solo si product_code es válido; si no, no
+        # sabemos qué modelo usar.
+        if code_valid:
+            Product = request.env[f"chat_umayor.product.{product_code}"].sudo()
+            product = Product.search([], limit=1)
+            if not product:
+                # No debe pasar porque ``data/products.xml`` siembra
+                # un singleton. Si pasa, es un bug de instalación.
+                errors["product_data"] = (
+                    "Producto no configurado. Contacta al administrador."
+                )
+            else:
+                for field, msg in product._validate(product_data or {}).items():
+                    errors[f"product_data.{field}"] = msg
+
+        return errors
+
+    # ------------------------------------------------------------------
+    # /session/<id>/submit_data
     # ------------------------------------------------------------------
 
     @route(
@@ -306,19 +402,124 @@ class ChatUmayorController(Controller):
         auth="public",
         methods=["POST"],
     )
-    def session_submit_data(self, session_id: int, **kwargs) -> dict:
-        """Stub del endpoint ``/submit_data``.
+    def session_submit_data(
+        self,
+        session_id: int,
+        product_code: str | None = None,
+        partner: dict | None = None,
+        product_data: dict | None = None,
+        **kwargs,
+    ) -> dict:
+        """Recibe el formulario, persiste el partner y calcula el resumen.
 
-        La implementación real llega en PLAN 08 (crear/actualizar
-        ``res.partner``, productos SOAP/Depósito, cálculos, transición
-        ``data_collection → review``). En v0.3 devuelve
-        ``INVALID_STATE`` para que el front pueda cablearse sin
-        romperse.
+        Flujo:
+            1. Valida sesión (existencia, no cerrada).
+            2. Valida estado: solo ``data_collection`` procesa. Si
+               está en ``review`` devuelve ``INVALID_STATE`` con
+               mensaje específico (ya enviado).
+            3. Valida payload (agregado, todos los errores de una).
+            4. Fija ``product_code`` en la sesión.
+            5. Crea/actualiza ``res.partner`` idempotente por RUT.
+            6. Calcula prima/intereses vía el modelo del producto.
+            7. Persiste ``submit_summary`` en la sesión (JSON).
+            8. Transiciona ``data_collection → review``.
+
+        Args:
+            session_id: Id de la sesión (viene en la URL).
+            product_code: ``"soap"`` o ``"deposit"``.
+            partner: Dict con ``name``, ``document_id``, ``email``,
+                ``phone`` (opcional).
+            product_data: Dict con campos del producto (ver
+                ``_validate`` de cada modelo).
+
+        Returns:
+            Shape ``{ok, data|error}``. En éxito, ``data`` incluye
+            ``state='review'`` y ``summary`` con el cálculo.
         """
-        return _err(
-            "INVALID_STATE",
-            "Operación aún no disponible en esta versión.",
+        session, err = self._get_session_or_error(session_id)
+        if err:
+            return err
+
+        # Estado: solo data_collection procesa.
+        if session.state == "review":
+            return _err(
+                "INVALID_STATE",
+                "Los datos ya fueron enviados. Continúa con la firma.",
+            )
+        if session.state != "data_collection":
+            return _err(
+                "INVALID_STATE",
+                "La sesión no está lista para recibir datos del formulario.",
+            )
+
+        # Validación agregada del payload.
+        field_errors = self._validate_submit_payload(
+            product_code, partner, product_data
         )
+        if field_errors:
+            return _err(
+                "VALIDATION_ERROR",
+                "Algunos campos son inválidos.",
+                fields=field_errors,
+            )
+
+        try:
+            # product_code del payload gana sobre el de la sesión
+            # (el usuario puede haber cambiado de idea tras discovery).
+            if session.product_code and session.product_code != product_code:
+                _logger.info(
+                    "Producto cambiado en submit (sesión %s): %s -> %s",
+                    session.id,
+                    session.product_code,
+                    product_code,
+                )
+            session.product_code = product_code
+
+            partner_rec = session._get_or_create_partner(partner)
+            session.partner_id = partner_rec.id
+
+            Product = request.env[
+                f"chat_umayor.product.{product_code}"
+            ].sudo()
+            product_rec = Product.search([], limit=1)
+            calculated = product_rec._calculate(product_data)
+
+            session.submit_summary = json.dumps(
+                {
+                    "product_code": product_code,
+                    "product_data": product_data,
+                    "calculated": calculated,
+                },
+                ensure_ascii=False,
+            )
+
+            session._do_transition("review")
+
+            return _ok(
+                {
+                    "state": session.state,
+                    "summary": {
+                        "product_name": product_rec.display_name,
+                        "partner_name": partner_rec.name,
+                        "calculated": calculated,
+                    },
+                }
+            )
+        except UserError as exc:
+            # Transición FSM rechazada (no debería ocurrir tras las
+            # validaciones de estado de arriba; defensa en profundidad).
+            _logger.warning(
+                "UserError en /submit_data sesión %s: %s",
+                session_id,
+                exc,
+            )
+            return _err("INVALID_STATE", str(exc))
+        except Exception:
+            _logger.exception(
+                "Error no controlado en /submit_data sesión %s",
+                session_id,
+            )
+            return _err("INTERNAL_ERROR", "Ocurrió un problema interno.")
 
     # ------------------------------------------------------------------
     # /session/<id>/sign — STUB en v0.3

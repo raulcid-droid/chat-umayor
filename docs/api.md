@@ -1,15 +1,16 @@
 # API `chat_umayor` — contrato backend ↔ frontend
 
-- **Versión**: `v0.3` (draft · propuesta unilateral del backend).
-- **Estado**: implementados 2 de 4 endpoints (`/session/new`, `/message`).
-  `/submit_data` y `/sign` son **stubs** que devuelven `INVALID_STATE`.
+- **Versión**: `v0.4` (draft).
+- **Estado**: implementados 3 de 4 endpoints (`/session/new`, `/message`,
+  `/submit_data`). Solo `/sign` sigue **stub** devolviendo
+  `INVALID_STATE` hasta PLAN 09.
 - **Fecha**: 2026-05-07.
 - **Fuente de verdad**: este documento. Cualquier cambio en endpoints se
   refleja aquí **en el mismo commit** que toca `controllers/main.py`
   (regla §10.6 de `AGENTS.md`).
 
 > Mientras este doc esté en `v0`, los payloads pueden cambiar sin aviso.
-> A partir de `v1` (tras PLAN 07) los cambios rompedores requieren bump
+> A partir de `v1` (tras PLAN 09) los cambios rompedores requieren bump
 > de versión explícito.
 
 ---
@@ -223,10 +224,9 @@ Envía un mensaje del usuario y recibe la respuesta del bot.
 
 ### 4.3 `POST /chat_umayor/session/<int:session_id>/submit_data`
 
-> ⚠️ **Stub en v0.3**: devuelve siempre `{"ok": false, "error": {"code": "INVALID_STATE", "message": "Operación aún no disponible en esta versión."}}`. La implementación real llega en **PLAN 08** (cuando existan `res.partner` + productos SOAP/Depósito + cálculos). El contrato del request/response de abajo es el objetivo final, no el comportamiento actual.
-
 Envía el formulario con los datos del cliente y del producto elegido.
-Transición típica: `data_collection → review`.
+Transición: `data_collection → review`. Requiere que la sesión esté
+en `state='data_collection'`.
 
 **Request** (ejemplo para SOAP):
 ```json
@@ -234,13 +234,14 @@ Transición típica: `data_collection → review`.
   "product_code": "soap",
   "partner": {
     "name": "Juan Pérez",
-    "document_id": "12.345.678-9",
+    "document_id": "12.345.678-5",
     "email": "juan@example.com",
     "phone": "+56 9 1234 5678"
   },
   "product_data": {
-    "vehicle_plate": "ABCD12",
-    "vehicle_year": 2020
+    "vehicle_plate": "BCDF12",
+    "vehicle_year": 2020,
+    "vehicle_type": "particular"
   }
 }
 ```
@@ -251,7 +252,7 @@ Transición típica: `data_collection → review`.
   "product_code": "deposit",
   "partner": { "name": "...", "document_id": "...", "email": "...", "phone": "..." },
   "product_data": {
-    "amount": 1500000,
+    "amount": 1000000,
     "term_days": 90
   }
 }
@@ -261,17 +262,33 @@ Transición típica: `data_collection → review`.
 | Campo                    | Tipo   | Requerido | Descripción                                              |
 |--------------------------|--------|-----------|----------------------------------------------------------|
 | `product_code`           | string | sí        | `"soap"` o `"deposit"`.                                  |
-| `partner.name`           | string | sí        | Nombre completo.                                         |
-| `partner.document_id`    | string | sí        | RUT/DNI ficticio. **TBD**: formato según país (ver §5).  |
-| `partner.email`          | string | sí        | Email válido.                                            |
-| `partner.phone`          | string | no        | Teléfono.                                                |
+| `partner.name`           | string | sí        | Nombre completo (máx 120 chars).                         |
+| `partner.document_id`    | string | sí        | RUT chileno. Acepta `12.345.678-5`, `12345678-5` o `123456785`. Validado por módulo 11. |
+| `partner.email`          | string | sí        | Email válido (máx 254 chars).                             |
+| `partner.phone`          | string | no        | Teléfono (máx 32 chars, formato libre).                  |
 | `product_data`           | object | sí        | Campos específicos del producto (ver abajo).             |
 
-**Campos `product_data` para SOAP**: `vehicle_plate` (string), `vehicle_year` (int). **TBD**: confirmar con profesor.
+**Campos `product_data` para SOAP**:
+| Campo           | Tipo   | Validación                                                                   |
+|-----------------|--------|------------------------------------------------------------------------------|
+| `vehicle_plate` | string | Regex `^[A-Z]{2}[A-Z0-9]{2}[0-9]{2}$` (ej: `BCDF12` o `AB1234`). Normaliza mayúsculas. |
+| `vehicle_year`  | int    | Entre 1950 y (año actual + 1).                                                |
+| `vehicle_type`  | string | Uno de: `particular`, `moto`, `comercial`, `taxi`. Determina la prima.        |
 
-**Campos `product_data` para Depósito**: `amount` (number, > 0), `term_days` (int, > 0).
+**Tarifas SOAP** (CLP, ficticias): `particular=7990`, `moto=3990`,
+`comercial=14990`, `taxi=24990`.
 
-**Response 200 OK**:
+**Campos `product_data` para Depósito**:
+| Campo       | Tipo  | Validación                                        |
+|-------------|-------|---------------------------------------------------|
+| `amount`    | number| Entre 50.000 y 100.000.000 CLP.                   |
+| `term_days` | int   | Uno de: `30`, `60`, `90`, `180`, `365`.            |
+
+**Tasa anual por plazo** (fracción, ficticias): `30→ 0.030`,
+`60→ 0.035`, `90→ 0.040`, `180→ 0.045`, `365→ 0.050`. Interés simple
+sobre año comercial de 360 días.
+
+**Response 200 OK (SOAP)**:
 ```json
 {
   "ok": true,
@@ -281,15 +298,36 @@ Transición típica: `data_collection → review`.
       "product_name": "SOAP",
       "partner_name": "Juan Pérez",
       "calculated": {
-        "premium": 7890,
-        "currency": "CLP"
+        "premium": 7990,
+        "currency": "CLP",
+        "vehicle_type": "particular"
       }
     }
   }
 }
 ```
 
-Para Depósito, `calculated` contiene `{"interest": ..., "total_at_maturity": ..., "currency": "CLP"}`.
+**Response 200 OK (Depósito)**:
+```json
+{
+  "ok": true,
+  "data": {
+    "state": "review",
+    "summary": {
+      "product_name": "Depósito a Plazo",
+      "partner_name": "Juan Pérez",
+      "calculated": {
+        "principal": 1000000,
+        "interest": 10000,
+        "total_at_maturity": 1010000,
+        "rate": 0.04,
+        "term_days": 90,
+        "currency": "CLP"
+      }
+    }
+  }
+}
+```
 
 **Response 200 con error de validación**:
 ```json
@@ -300,24 +338,39 @@ Para Depósito, `calculated` contiene `{"interest": ..., "total_at_maturity": ..
     "message": "Algunos campos son inválidos.",
     "fields": {
       "partner.email": "Email con formato inválido.",
-      "product_data.amount": "Debe ser mayor a 0."
+      "product_data.amount": "Debe estar entre 50,000 y 100,000,000 CLP."
     }
   }
 }
 ```
 
-**Errores posibles**: `SESSION_NOT_FOUND`, `SESSION_CLOSED`, `INVALID_STATE`, `VALIDATION_ERROR`.
+El dict `fields` usa **dot-notation** (`partner.*`, `product_data.*`)
+y devuelve **todas las violaciones detectadas en una sola pasada**, no
+la primera. Si `product_code` no es válido, se omiten las
+validaciones de `product_data` (no hay modelo que aplicar) pero se
+siguen validando los campos de `partner`.
+
+**Errores posibles**:
+| `code`                | Cuándo                                                                       |
+|-----------------------|------------------------------------------------------------------------------|
+| `SESSION_NOT_FOUND`   | `session_id` inexistente.                                                    |
+| `SESSION_CLOSED`      | Sesión en `state='closed'`.                                                  |
+| `INVALID_STATE`       | Estado no es `data_collection`. Mensaje específico si ya estaba en `review`: *"Los datos ya fueron enviados. Continúa con la firma."*. |
+| `VALIDATION_ERROR`    | Payload incompleto o inválido. `fields` detalla por campo.                  |
+| `INTERNAL_ERROR`      | Excepción no clasificada (logeada en servidor).                             |
 
 **Notas backend**:
-- Crea/actualiza `res.partner` (idempotente por `document_id`).
-- Calcula prima SOAP o intereses del depósito en el modelo del producto (no en prompt).
-- Pasa `state` a `review`.
+- `res.partner` es **idempotente por `vat`**: se busca el partner por RUT normalizado (`NNNNNNNN-D`); si existe, se hace `write()` con los campos no vacíos; si no, `create()`. Dos submits con el mismo RUT no crean duplicados.
+- `product_code` del payload gana sobre el `product_code` de la sesión (si el usuario cambió de opinión tras discovery).
+- La sesión guarda un `submit_summary` (JSON serializado) con `{product_code, product_data, calculated}` para que `/sign` (PLAN 09) genere el contrato sin recalcular.
+- Validación de RUT: algoritmo módulo 11 con multiplicadores cíclicos `[2,3,4,5,6,7]`. Acepta `K` o `0` como DV.
+- Prima SOAP y cálculos de depósito viven en los modelos `chat_umayor.product.soap` y `chat_umayor.product.deposit` (no en el prompt).
 
 ---
 
 ### 4.4 `POST /chat_umayor/session/<int:session_id>/sign`
 
-> ⚠️ **Stub en v0.3**: devuelve siempre `{"ok": false, "error": {"code": "INVALID_STATE", "message": "Operación aún no disponible en esta versión."}}`. La implementación real llega en **PLAN 09** (integración con Odoo Sign). El contrato de abajo es el objetivo final, no el comportamiento actual.
+> ⚠️ **Stub en v0.4**: devuelve siempre `{"ok": false, "error": {"code": "INVALID_STATE", "message": "Operación aún no disponible en esta versión."}}`. La implementación real llega en **PLAN 09** (integración con Odoo Sign). El contrato de abajo es el objetivo final, no el comportamiento actual.
 
 Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si es reintento).
 
@@ -346,16 +399,31 @@ Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si
 ## 5. TBD / preguntas abiertas
 
 1. ~~**CSRF en JSON públicos**~~ → resuelto en `v0.1`: Odoo lo gestiona en `type='jsonrpc'`.
-2. **Formato de `document_id`**: depende de qué país se use para SOAP (AGENTS §1 dice "confirmar con el profesor"). Por ahora aceptamos string libre y validamos en backend.
+2. ~~**Formato de `document_id`**~~ → resuelto en `v0.4`: **Chile, RUT con validación módulo 11**. Se acepta cualquiera de los 3 formatos y se normaliza a `NNNNNNNN-D`.
 3. **Polling de estado post-firma**: ¿endpoint dedicado `GET /state` o incluir el estado de firma en la próxima respuesta de `/message`?
-4. **Rate limiting**: no contemplado en `v0.1`. Ante abuso del endpoint `/message`, el wrapper de Gemini ya tiene backoff (§7 AGENTS) pero no hay protección por IP.
-5. **I18n de `error.message`**: en `v0.1` solo español. Si UI quisiera otros idiomas, agregar `Accept-Language` y `.po`.
-6. **Campos de SOAP**: confirmar con profesor qué datos vehiculares son obligatorios.
+4. **Rate limiting**: no contemplado. Ante abuso del endpoint `/message`, el wrapper de Gemini ya tiene backoff (§7 AGENTS) pero no hay protección por IP.
+5. **I18n de `error.message`**: por ahora solo español. Si UI quisiera otros idiomas, agregar `Accept-Language` y `.po`.
+6. ~~**Campos de SOAP**~~ → resuelto en `v0.4`: `vehicle_plate`, `vehicle_year`, `vehicle_type`. Prima plana por tipo de vehículo.
 
 ---
 
 ## 6. Changelog
 
+- **v0.4** (2026-05-07): `/submit_data` real (PLAN 08).
+  - Implementación completa del endpoint: validación agregada por
+    campo, `res.partner` idempotente por RUT (normalizado a
+    `NNNNNNNN-D`, validación módulo 11), cálculos financieros en los
+    modelos `chat_umayor.product.soap` y `chat_umayor.product.deposit`.
+  - Transición `data_collection → review` automatiza en éxito.
+  - Resubmit desde `review` devuelve `INVALID_STATE` con mensaje
+    específico (no permite edición post-envío).
+  - Shape de `fields` en `VALIDATION_ERROR` documentado explícitamente
+    (dot-notation, todas las violaciones de una pasada).
+  - Nuevo campo SOAP: `vehicle_type` (`particular`/`moto`/`comercial`/`taxi`).
+  - Tarifas y tasas documentadas en §4.3; valores ficticios
+    académicos. Los cálculos viven en los modelos de producto, no en
+    el prompt.
+  - Cierra TBDs 2 (Chile) y 6 (campos SOAP).
 - **v0.3** (2026-05-07): primera versión con endpoints reales
   implementados.
   - `/session/new` y `/session/<id>/message` funcionales (PLAN 07).
@@ -376,4 +444,4 @@ Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si
   TBD de CSRF.
 - **v0** (2026-05-02): primer draft tras PLAN 02. Sin implementación aún.
 
-<!-- v0.3 · 2026-05-07 · PLAN 07: /session/new + /message reales, stubs documentados, product_code estable -->
+<!-- v0.4 · 2026-05-07 · PLAN 08: /submit_data real con productos SOAP/Depósito y RUT chileno -->

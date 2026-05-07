@@ -1,10 +1,10 @@
 """Tests HTTP de los endpoints del módulo ``chat_umayor``.
 
-Cubre los 2 endpoints reales introducidos en PLAN 07
-(``/session/new`` y ``/session/<id>/message``) y los 2 stubs
-(``/submit_data``, ``/sign``). El wrapper ``GeminiClient`` se mockea
-en cada test que lo requiere para no depender de ``google-genai`` ni
-hacer llamadas reales.
+Cubre los 3 endpoints reales (``/session/new``, ``/session/<id>/message``,
+``/session/<id>/submit_data``) y el único stub restante (``/sign``,
+hasta PLAN 09). El wrapper ``GeminiClient`` se mockea en los tests
+que lo requieren para no depender de ``google-genai`` ni hacer
+llamadas reales.
 
 Todos los tests son ``HttpCase`` porque los endpoints son
 ``type='jsonrpc'`` y el envoltorio JSON-RPC solo se ejercita vía HTTP.
@@ -245,8 +245,173 @@ class TestSessionMessage(HttpCase):
 
 
 @tagged("chat_umayor", "post_install", "-at_install")
+class TestSessionSubmitData(HttpCase):
+    """Endpoint ``POST /chat_umayor/session/<id>/submit_data`` (PLAN 08)."""
+
+    # RUT chileno válido por módulo 11 (ver test_rut_validation).
+    VALID_RUT = "12.345.678-5"
+    VALID_PARTNER = {
+        "name": "Juan Pérez",
+        "document_id": VALID_RUT,
+        "email": "juan@example.com",
+        "phone": "+56 9 1234 5678",
+    }
+    VALID_SOAP_DATA = {
+        "vehicle_plate": "BCDF12",
+        "vehicle_year": 2020,
+        "vehicle_type": "particular",
+    }
+    VALID_DEPOSIT_DATA = {"amount": 1_000_000, "term_days": 90}
+
+    def _make_session_in_state(self, state: str, product_code=None):
+        """Crea una sesión y la lleva al estado pedido a través del FSM.
+
+        ``product_code`` se setea en el momento adecuado (tras
+        ``discovery``) para reflejar el flujo real.
+        """
+        session = self.env["chatbot.session"]._create_with_greeting()
+        chain = [
+            "discovery",
+            "product_info",
+            "data_collection",
+            "review",
+            "signing",
+            "closed",
+        ]
+        for target in chain:
+            session._do_transition(target)
+            if target == "discovery" and product_code:
+                session.product_code = product_code
+            if target == state:
+                break
+        return session
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.session = self._make_session_in_state(
+            "data_collection", product_code="soap"
+        )
+
+    def _call(self, params: dict, session_id=None) -> dict:
+        sid = self.session.id if session_id is None else session_id
+        response = self.url_open(
+            f"/chat_umayor/session/{sid}/submit_data",
+            data=_jsonrpc_payload(params),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 200)
+        envelope = response.json()
+        self.assertIn("result", envelope, f"JSON-RPC sin 'result': {envelope}")
+        return envelope["result"]
+
+    # -----------------------------------------------------------------
+    # Happy paths
+    # -----------------------------------------------------------------
+
+    def test_submit_data_soap_happy_path(self) -> None:
+        """SOAP válido transiciona a review y devuelve summary."""
+        result = self._call(
+            {
+                "product_code": "soap",
+                "partner": self.VALID_PARTNER,
+                "product_data": self.VALID_SOAP_DATA,
+            }
+        )
+        self.assertTrue(result["ok"], f"no ok: {result}")
+        data = result["data"]
+        self.assertEqual(data["state"], "review")
+        summary = data["summary"]
+        self.assertEqual(summary["product_name"], "SOAP")
+        self.assertEqual(summary["partner_name"], "Juan Pérez")
+        self.assertEqual(summary["calculated"]["premium"], 7990)
+        self.assertEqual(summary["calculated"]["currency"], "CLP")
+
+        self.session.invalidate_recordset()
+        self.assertEqual(self.session.state, "review")
+        self.assertTrue(self.session.submit_summary)
+
+    def test_submit_data_deposit_happy_path(self) -> None:
+        """Depósito válido calcula interés simple y avanza a review."""
+        # La sesión de setUp está con product_code='soap'; aquí
+        # el payload trae 'deposit' y debe ganar.
+        result = self._call(
+            {
+                "product_code": "deposit",
+                "partner": self.VALID_PARTNER,
+                "product_data": self.VALID_DEPOSIT_DATA,
+            }
+        )
+        self.assertTrue(result["ok"], f"no ok: {result}")
+        data = result["data"]
+        self.assertEqual(data["state"], "review")
+        calc = data["summary"]["calculated"]
+        self.assertEqual(calc["principal"], 1_000_000)
+        self.assertEqual(calc["interest"], 10_000)
+        self.assertEqual(calc["total_at_maturity"], 1_010_000)
+
+        self.session.invalidate_recordset()
+        self.assertEqual(self.session.product_code, "deposit")
+
+    # -----------------------------------------------------------------
+    # Errores
+    # -----------------------------------------------------------------
+
+    def test_submit_data_validation_error_multiple_fields(self) -> None:
+        """Email mal + monto fuera de rango devuelve ambos campos en fields."""
+        bad_partner = dict(self.VALID_PARTNER, email="no-es-email")
+        bad_deposit = {"amount": 10, "term_days": 90}  # 10 < 50.000
+        result = self._call(
+            {
+                "product_code": "deposit",
+                "partner": bad_partner,
+                "product_data": bad_deposit,
+            }
+        )
+        self.assertFalse(result["ok"])
+        err = result["error"]
+        self.assertEqual(err["code"], "VALIDATION_ERROR")
+        self.assertIn("partner.email", err["fields"])
+        self.assertIn("product_data.amount", err["fields"])
+
+        # La sesión no debe avanzar.
+        self.session.invalidate_recordset()
+        self.assertEqual(self.session.state, "data_collection")
+
+    def test_submit_data_invalid_state_when_in_review(self) -> None:
+        """Resubmit en ``review`` devuelve INVALID_STATE con mensaje específico."""
+        self.session = self._make_session_in_state(
+            "review", product_code="soap"
+        )
+        result = self._call(
+            {
+                "product_code": "soap",
+                "partner": self.VALID_PARTNER,
+                "product_data": self.VALID_SOAP_DATA,
+            }
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "INVALID_STATE")
+        self.assertIn("ya fueron enviados", result["error"]["message"])
+
+    def test_submit_data_partner_created_in_db(self) -> None:
+        """Tras submit, res.partner existe con el RUT normalizado."""
+        self._call(
+            {
+                "product_code": "soap",
+                "partner": self.VALID_PARTNER,
+                "product_data": self.VALID_SOAP_DATA,
+            }
+        )
+        partner = self.env["res.partner"].search(
+            [("vat", "=", "12345678-5")], limit=1
+        )
+        self.assertTrue(partner, "Debe existir res.partner con vat normalizado")
+        self.assertEqual(partner.name, "Juan Pérez")
+
+
+@tagged("chat_umayor", "post_install", "-at_install")
 class TestStubs(HttpCase):
-    """Endpoints stub de v0.3: ``/submit_data`` y ``/sign``."""
+    """Endpoint stub restante en v0.4: ``/sign`` (real en PLAN 09)."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -260,11 +425,6 @@ class TestStubs(HttpCase):
         )
         self.assertEqual(response.status_code, 200)
         return response.json()["result"]
-
-    def test_submit_data_stub_returns_invalid_state(self) -> None:
-        result = self._call("submit_data", {"product_code": "soap"})
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "INVALID_STATE")
 
     def test_sign_stub_returns_invalid_state(self) -> None:
         result = self._call("sign")
