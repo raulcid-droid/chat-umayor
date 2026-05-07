@@ -2,3 +2,7 @@
 PLAN.md
 NOTES.md
 AGENTS.md
+
+# Bytecode de Python
+__pycache__/
+*.pyc

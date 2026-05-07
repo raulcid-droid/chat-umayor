@@ -134,6 +134,7 @@ class TestGeminiClient(TransactionCase):
     # Retries ante rate limit
     # ------------------------------------------------------------------
 
+    @mute_logger(_GEMINI_LOGGER)
     def test_generate_reply_retries_on_rate_limit(self) -> None:
         """Tras un 429, reintenta y devuelve la respuesta del 2º intento."""
         side_effects = [_FakeRateLimit("429 rate limit"), "ok"]
@@ -166,6 +167,7 @@ class TestGeminiClient(TransactionCase):
     # Timeout: 1 retry, luego fallback canned (no excepción)
     # ------------------------------------------------------------------
 
+    @mute_logger(_GEMINI_LOGGER)
     def test_generate_reply_timeout_retries_then_canned(self) -> None:
         """Ante timeout persistente, devuelve el fallback canned."""
         with (
@@ -180,6 +182,7 @@ class TestGeminiClient(TransactionCase):
         self.assertEqual(reply, _CANNED_FALLBACK)
         self.assertEqual(mock_call.call_count, 2)
 
+    @mute_logger(_GEMINI_LOGGER)
     def test_generate_reply_timeout_recovers_on_retry(self) -> None:
         """Si el 2º intento tras timeout funciona, devuelve esa respuesta."""
         side_effects = [_FakeTimeout("timeout"), "recuperado"]
