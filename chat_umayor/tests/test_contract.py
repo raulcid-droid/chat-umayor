@@ -7,12 +7,16 @@ Cubren:
     - Transición a ``signed`` + cierre de la sesión.
     - Formato de ``reference`` (``CH-NNNNNN``).
 
-``_launch_signature`` mockea ``sign.request.create`` y el parámetro
-``chat_umayor.sign_template_id`` para no tocar Sign real.
+Para los tests que pasan por ``_launch_signature`` creamos un
+``sign.template`` real con un ``ir.attachment`` dummy (PDF mínimo en
+base64), para que el ``sign.request`` que genera el flujo tenga un
+FK válido hacia una plantilla existente. Si Odoo 19 exige campos
+adicionales en alguno de esos modelos, ``_ensure_sign_template``
+hace ``skipTest`` con mensaje claro.
 """
 
+import base64
 import json
-from unittest.mock import MagicMock, patch
 
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
@@ -21,6 +25,50 @@ from odoo.tests.common import TransactionCase
 @tagged("chat_umayor", "post_install", "-at_install")
 class TestChatbotContract(TransactionCase):
     """Modelo ``chat_umayor.contract`` y ``_launch_signature``."""
+
+    # ------------------------------------------------------------------
+    # Fixtures compartidas
+    # ------------------------------------------------------------------
+
+    def _ensure_sign_template(self):
+        """Crea un ``sign.template`` real y setea el ``ir.config_parameter``.
+
+        Se necesita para que el ``sign.request`` que crea
+        ``_launch_signature`` tenga un FK válido (``template_id``) y
+        para que el ``contract.write({'sign_request_id': ...})`` del
+        helper no viole el FK hacia ``sign_request``.
+
+        Si la creación falla (requirements extra de Odoo 19 en
+        ``ir.attachment`` o ``sign.template``), el test se
+        ``skipTest`` con mensaje descriptivo en vez de reventar.
+        """
+        try:
+            attachment = self.env["ir.attachment"].sudo().create(
+                {
+                    "name": "test_contract.pdf",
+                    "datas": base64.b64encode(b"%PDF-1.4\n% fake test pdf\n"),
+                    "mimetype": "application/pdf",
+                }
+            )
+            template = (
+                self.env["sign.template"]
+                .sudo()
+                .create(
+                    {
+                        "name": "Test Template (chat_umayor)",
+                        "attachment_id": attachment.id,
+                    }
+                )
+            )
+        except Exception as exc:  # pragma: no cover
+            self.skipTest(
+                "No se pudo crear sign.template/ir.attachment para el "
+                f"test (posibles requirements extra en Odoo 19): {exc}"
+            )
+        self.env["ir.config_parameter"].sudo().set_param(
+            "chat_umayor.sign_template_id", str(template.id)
+        )
+        return template
 
     def _make_review_session(self, partner_values=None, summary=None):
         """Crea una sesión en ``review`` con partner y submit_summary.
@@ -60,27 +108,6 @@ class TestChatbotContract(TransactionCase):
         session.submit_summary = json.dumps(summary or summary_defaults)
         return session, partner
 
-    def _patch_sign_stack(self, template_exists=True):
-        """Devuelve context manager que parchea sign.template y sign.request.
-
-        ``template_exists=False`` simula una plantilla configurada pero
-        inexistente (caso ``SIGN_UNAVAILABLE``). El contexto setea el
-        parámetro ``chat_umayor.sign_template_id`` a 999 y mockea el
-        browse/exists para controlarlo.
-        """
-        self.env["ir.config_parameter"].sudo().set_param(
-            "chat_umayor.sign_template_id", "999"
-        )
-        fake_template = MagicMock()
-        fake_template.id = 999
-        fake_template.exists.return_value = fake_template if template_exists else self.env["sign.template"]
-
-        fake_sign_request = MagicMock()
-        fake_sign_request.id = 12345
-        fake_sign_request.request_item_ids = []
-
-        return fake_template, fake_sign_request
-
     # ------------------------------------------------------------------
     # reference (asignado en create override)
     # ------------------------------------------------------------------
@@ -110,18 +137,9 @@ class TestChatbotContract(TransactionCase):
     def test_create_contract_from_submit_summary(self) -> None:
         """``_launch_signature`` crea contrato con snapshot de partner."""
         session, partner = self._make_review_session()
-        fake_template, fake_sign_request = self._patch_sign_stack()
+        self._ensure_sign_template()
 
-        with patch.object(
-            type(self.env["sign.template"]),
-            "browse",
-            return_value=fake_template,
-        ), patch.object(
-            type(self.env["sign.request"]),
-            "create",
-            return_value=fake_sign_request,
-        ):
-            contract, sign_url = session._launch_signature()
+        contract, sign_url = session._launch_signature()
 
         self.assertEqual(contract.session_id.id, session.id)
         self.assertEqual(contract.partner_id.id, partner.id)
@@ -136,26 +154,19 @@ class TestChatbotContract(TransactionCase):
         self.assertEqual(product_data["vehicle_plate"], "BCDF12")
         calculated = json.loads(contract.calculated_json)
         self.assertEqual(calculated["premium"], 7990)
-        # Estado y URL:
+        # Estado y vínculo con sign.request real:
         self.assertEqual(contract.state, "signing")
-        self.assertEqual(contract.sign_request_id.id, 12345)
-        self.assertIn("/sign/document/12345", sign_url)
+        self.assertTrue(contract.sign_request_id)
+        self.assertIn(
+            f"/sign/document/{contract.sign_request_id.id}", sign_url
+        )
 
     def test_partner_snapshot_is_immutable_on_partner_change(self) -> None:
         """Mutar el partner después NO afecta al contrato (snapshot)."""
         session, partner = self._make_review_session()
-        fake_template, fake_sign_request = self._patch_sign_stack()
+        self._ensure_sign_template()
 
-        with patch.object(
-            type(self.env["sign.template"]),
-            "browse",
-            return_value=fake_template,
-        ), patch.object(
-            type(self.env["sign.request"]),
-            "create",
-            return_value=fake_sign_request,
-        ):
-            contract, _ = session._launch_signature()
+        contract, _ = session._launch_signature()
 
         # Mutación posterior del partner:
         partner.write(

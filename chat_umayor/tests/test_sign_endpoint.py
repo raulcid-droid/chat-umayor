@@ -1,12 +1,17 @@
 """Tests HTTP del endpoint ``POST /chat_umayor/session/<id>/sign``.
 
-Mockeamos ``sign.template.browse`` y ``sign.request.create`` para no
-tocar Odoo Sign real. La validación end-to-end con Sign real se hace
-manualmente (ver ``tests/manual/test_sign_integration.py``).
+Creamos un ``sign.template`` real con un ``ir.attachment`` dummy para
+que el ``sign.request`` generado por ``_launch_signature`` tenga un
+FK válido. Si algún test requiere que **falle** la creación (caso
+``SIGN_UNAVAILABLE``), se limpia explícitamente el parámetro
+``chat_umayor.sign_template_id``.
+
+La validación end-to-end con Sign real se hace manualmente (ver
+``tests/manual/test_sign_integration.py``).
 """
 
+import base64
 import json
-from unittest.mock import MagicMock, patch
 
 from odoo.tests import tagged
 from odoo.tests.common import HttpCase
@@ -70,28 +75,45 @@ class TestSessionSign(HttpCase):
         )
         return session
 
-    def _configure_sign_template(self, template_id: str = "999") -> None:
-        """Setea el ``ir.config_parameter`` para la plantilla."""
+    def _ensure_sign_template(self):
+        """Crea ``sign.template`` + ``ir.attachment`` reales y fija config.
+
+        Devuelve el recordset de la plantilla. Si Odoo 19 requiere
+        campos adicionales, hace ``skipTest`` con mensaje claro.
+        """
+        try:
+            attachment = self.env["ir.attachment"].sudo().create(
+                {
+                    "name": "test_sign_endpoint.pdf",
+                    "datas": base64.b64encode(b"%PDF-1.4\n% fake test pdf\n"),
+                    "mimetype": "application/pdf",
+                }
+            )
+            template = (
+                self.env["sign.template"]
+                .sudo()
+                .create(
+                    {
+                        "name": "Test Template (chat_umayor)",
+                        "attachment_id": attachment.id,
+                    }
+                )
+            )
+        except Exception as exc:  # pragma: no cover
+            self.skipTest(
+                "No se pudo crear sign.template/ir.attachment: "
+                f"{exc}"
+            )
         self.env["ir.config_parameter"].sudo().set_param(
-            "chat_umayor.sign_template_id", template_id
+            "chat_umayor.sign_template_id", str(template.id)
         )
+        return template
 
     def _clear_sign_template(self) -> None:
         """Quita el parámetro para simular que no hay plantilla configurada."""
         self.env["ir.config_parameter"].sudo().set_param(
             "chat_umayor.sign_template_id", "0"
         )
-
-    def _fake_sign_stack(self):
-        """Mocks coherentes para el flujo de firma."""
-        fake_template = MagicMock()
-        fake_template.id = 999
-        fake_template.exists.return_value = fake_template
-
-        fake_sign_request = MagicMock()
-        fake_sign_request.id = 12345
-        fake_sign_request.request_item_ids = []
-        return fake_template, fake_sign_request
 
     def _call(self, session_id: int) -> dict:
         response = self.url_open(
@@ -111,24 +133,14 @@ class TestSessionSign(HttpCase):
     def test_sign_happy_path_creates_contract_and_returns_url(self) -> None:
         """Sesión en review + plantilla OK → crea contract, devuelve url."""
         session = self._make_review_session_with_summary()
-        self._configure_sign_template()
-        fake_template, fake_sign_request = self._fake_sign_stack()
+        self._ensure_sign_template()
 
-        with patch.object(
-            type(self.env["sign.template"]),
-            "browse",
-            return_value=fake_template,
-        ), patch.object(
-            type(self.env["sign.request"]),
-            "create",
-            return_value=fake_sign_request,
-        ):
-            result = self._call(session.id)
+        result = self._call(session.id)
 
         self.assertTrue(result["ok"], f"no ok: {result}")
         data = result["data"]
         self.assertIsInstance(data["contract_id"], int)
-        self.assertIn("/sign/document/12345", data["sign_url"])
+        self.assertTrue(data["sign_url"].startswith("/sign/document/"))
         self.assertEqual(data["state"], "signing")
 
         session.invalidate_recordset()
@@ -138,6 +150,7 @@ class TestSessionSign(HttpCase):
         )
         self.assertTrue(contract)
         self.assertEqual(contract.state, "signing")
+        self.assertTrue(contract.sign_request_id)
 
     # -----------------------------------------------------------------
     # Errores
@@ -159,20 +172,10 @@ class TestSessionSign(HttpCase):
     def test_sign_idempotent_returns_same_url(self) -> None:
         """2 llamadas consecutivas devuelven el mismo contract_id y URL."""
         session = self._make_review_session_with_summary()
-        self._configure_sign_template()
-        fake_template, fake_sign_request = self._fake_sign_stack()
+        self._ensure_sign_template()
 
-        with patch.object(
-            type(self.env["sign.template"]),
-            "browse",
-            return_value=fake_template,
-        ), patch.object(
-            type(self.env["sign.request"]),
-            "create",
-            return_value=fake_sign_request,
-        ):
-            first = self._call(session.id)
-            second = self._call(session.id)
+        first = self._call(session.id)
+        second = self._call(session.id)
 
         self.assertTrue(first["ok"])
         self.assertTrue(second["ok"])
@@ -203,7 +206,7 @@ class TestSessionSign(HttpCase):
             session._do_transition(target)
         # Forzamos a review sin haber pasado por /submit_data real.
         # session.submit_summary sigue falsy.
-        self._configure_sign_template()
+        self._ensure_sign_template()
 
         result = self._call(session.id)
         self.assertFalse(result["ok"])
