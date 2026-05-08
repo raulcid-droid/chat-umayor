@@ -1,13 +1,14 @@
 """Controllers HTTP del módulo ``chat_umayor``.
 
 Expone los endpoints JSON-RPC documentados en ``docs/api.md``.
-Estado en v0.4 (PLAN 08):
+Estado en v0.5 (PLAN 09):
 
 - ``/chat_umayor/ping``                              — smoke check (PLAN 03).
 - ``/chat_umayor/session/new``                       — crea sesión + greeting.
 - ``/chat_umayor/session/<id>/message``              — turno de chat con Gemini.
 - ``/chat_umayor/session/<id>/submit_data``          — formulario (PLAN 08).
-- ``/chat_umayor/session/<id>/sign``                 — **stub** v0.4 (PLAN 09).
+- ``/chat_umayor/session/<id>/sign``                 — firma real (PLAN 09).
+- ``/chat_umayor/session/<id>/state``                — polling de estado (PLAN 09).
 
 Shape de respuesta (dentro del ``result`` JSON-RPC)::
 
@@ -104,18 +105,25 @@ class ChatUmayorController(Controller):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_session_or_error(session_id: int):
+    def _get_session_or_error(session_id: int, allow_closed: bool = False):
         """Busca la sesión y devuelve (session, None) o (None, err).
 
-        Valida existencia y que no esté cerrada. El controller
-        normalmente hace::
+        Valida existencia y, por defecto, que no esté cerrada. El
+        controller normalmente hace::
 
             session, err = self._get_session_or_error(session_id)
             if err: return err
 
+        Args:
+            session_id: Id del registro ``chatbot.session``.
+            allow_closed: Si ``True``, no rechaza sesiones en
+                ``state='closed'``. Lo usa ``/state`` para permitir
+                consultar el estado final tras la firma.
+
         Returns:
             Tupla ``(recordset_sesion, None)`` si todo OK, o
-            ``(None, dict_error)`` si la sesión no existe o está cerrada.
+            ``(None, dict_error)`` si la sesión no existe o está
+            cerrada (con ``allow_closed=False``).
         """
         session = (
             request.env["chatbot.session"].sudo().browse(session_id).exists()
@@ -125,7 +133,7 @@ class ChatUmayorController(Controller):
                 "SESSION_NOT_FOUND",
                 "La sesión indicada no existe o expiró.",
             )
-        if session.state == "closed":
+        if session.state == "closed" and not allow_closed:
             return None, _err(
                 "SESSION_CLOSED",
                 "La sesión ya está cerrada.",
@@ -522,7 +530,7 @@ class ChatUmayorController(Controller):
             return _err("INTERNAL_ERROR", "Ocurrió un problema interno.")
 
     # ------------------------------------------------------------------
-    # /session/<id>/sign — STUB en v0.3
+    # /session/<id>/sign
     # ------------------------------------------------------------------
 
     @route(
@@ -532,14 +540,158 @@ class ChatUmayorController(Controller):
         methods=["POST"],
     )
     def session_sign(self, session_id: int, **kwargs) -> dict:
-        """Stub del endpoint ``/sign``.
+        """Lanza el flujo de firma con Odoo Sign.
 
-        La implementación real llega en PLAN 09 (Odoo Sign, contrato,
-        plantilla, callback). En v0.3 devuelve ``INVALID_STATE``.
+        Flujo:
+            1. Valida sesión existente y no cerrada.
+            2. Si está en ``signing``, devuelve el ``sign_url`` del
+               contrato existente (idempotente).
+            3. Si está en ``review`` y hay ``submit_summary``, crea
+               contrato + ``sign.request`` vía ``_launch_signature``
+               y transiciona a ``signing``.
+            4. Otros estados → ``INVALID_STATE``.
+            5. Falta ``submit_summary`` → ``MISSING_CONTRACT_DATA``.
+            6. Plantilla no configurada o fallo al crear
+               ``sign.request`` → ``SIGN_UNAVAILABLE``.
+
+        Args:
+            session_id: Id de la sesión (viene en la URL).
+
+        Returns:
+            Shape ``{ok, data|error}``. En éxito, ``data`` incluye
+            ``contract_id``, ``sign_url`` y ``state``.
         """
-        return _err(
-            "INVALID_STATE",
-            "Operación aún no disponible en esta versión.",
+        session, err = self._get_session_or_error(session_id)
+        if err:
+            return err
+
+        # Idempotencia: reutiliza contrato existente si ya se está
+        # firmando.
+        if session.state == "signing":
+            contract = (
+                request.env["chat_umayor.contract"]
+                .sudo()
+                .search([("session_id", "=", session.id)], limit=1)
+            )
+            if contract and contract.state == "signing":
+                try:
+                    sign_url = contract._get_sign_url()
+                except UserError as exc:
+                    return _err("SIGN_UNAVAILABLE", str(exc))
+                return _ok(
+                    {
+                        "contract_id": contract.id,
+                        "sign_url": sign_url,
+                        "state": session.state,
+                    }
+                )
+            # signing en la sesión pero sin contrato 'signing' →
+            # inconsistencia (ej. contrato cancelado manualmente).
+            return _err(
+                "INVALID_STATE",
+                "La sesión está en firma pero el contrato no está "
+                "disponible. Contacta al administrador.",
+            )
+
+        if session.state != "review":
+            return _err(
+                "INVALID_STATE",
+                "La sesión no está lista para firmar.",
+            )
+
+        if not session.submit_summary:
+            return _err(
+                "MISSING_CONTRACT_DATA",
+                "Faltan datos del formulario para generar el contrato.",
+            )
+
+        try:
+            contract, sign_url = session._launch_signature()
+            session._do_transition("signing")
+            return _ok(
+                {
+                    "contract_id": contract.id,
+                    "sign_url": sign_url,
+                    "state": session.state,
+                }
+            )
+        except UserError as exc:
+            msg = str(exc)
+            # Clasificamos por contenido del mensaje: las razones
+            # "plantilla/firma no configurada/no existe" y "no se pudo
+            # iniciar la firma" son ``SIGN_UNAVAILABLE``; "faltan
+            # datos del formulario" es ``MISSING_CONTRACT_DATA``;
+            # resto es ``INVALID_STATE``.
+            lower = msg.lower()
+            if (
+                "plantilla" in lower
+                or "firma no está configurada" in lower
+                or "no se pudo iniciar la firma" in lower
+            ):
+                return _err("SIGN_UNAVAILABLE", msg)
+            if "datos del formulario" in lower or "corruptos" in lower:
+                return _err("MISSING_CONTRACT_DATA", msg)
+            return _err("INVALID_STATE", msg)
+        except Exception:
+            _logger.exception(
+                "Error no controlado en /sign sesión %s", session_id
+            )
+            return _err("INTERNAL_ERROR", "Ocurrió un problema interno.")
+
+    # ------------------------------------------------------------------
+    # /session/<id>/state — polling ligero
+    # ------------------------------------------------------------------
+
+    @route(
+        "/chat_umayor/session/<int:session_id>/state",
+        type="jsonrpc",
+        auth="public",
+        methods=["POST"],
+    )
+    def session_state(self, session_id: int, **kwargs) -> dict:
+        """Devuelve el estado actual de la sesión y su contrato (si aplica).
+
+        Endpoint barato pensado para polling del front mientras el
+        usuario firma en otra pestaña. Acepta sesiones ``closed``
+        (para que el polling vea el cierre tras la firma).
+
+        Args:
+            session_id: Id de la sesión (viene en la URL).
+
+        Returns:
+            Shape ``{ok, data}`` con:
+                - ``state`` (string): estado actual del FSM.
+                - ``product_code`` (string | null).
+                - ``contract`` (object | null): si hay contrato
+                  asociado, incluye ``state``, ``signed_at``
+                  (ISO-8601 o null) y ``reference``.
+        """
+        session, err = self._get_session_or_error(
+            session_id, allow_closed=True
         )
+        if err:
+            return err
+
+        data = {
+            "state": session.state,
+            "product_code": session.product_code or None,
+            "contract": None,
+        }
+        contract = (
+            request.env["chat_umayor.contract"]
+            .sudo()
+            .search([("session_id", "=", session.id)], limit=1)
+        )
+        if contract:
+            data["contract"] = {
+                "state": contract.state,
+                "signed_at": (
+                    contract.signed_at.isoformat()
+                    if contract.signed_at
+                    else None
+                ),
+                "reference": contract.reference or None,
+            }
+        return _ok(data)
 
 

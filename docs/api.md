@@ -1,17 +1,18 @@
 # API `chat_umayor` — contrato backend ↔ frontend
 
-- **Versión**: `v0.4` (draft).
-- **Estado**: implementados 3 de 4 endpoints (`/session/new`, `/message`,
-  `/submit_data`). Solo `/sign` sigue **stub** devolviendo
-  `INVALID_STATE` hasta PLAN 09.
+- **Versión**: `v0.5` (draft).
+- **Estado**: implementados **los 5 endpoints del contrato**
+  (`/session/new`, `/message`, `/submit_data`, `/sign`, `/state`).
+  Backend code-complete. UI y plantilla de firma pendientes en Romina
+  (ver `HANDOFF-romina.md`).
 - **Fecha**: 2026-05-07.
 - **Fuente de verdad**: este documento. Cualquier cambio en endpoints se
   refleja aquí **en el mismo commit** que toca `controllers/main.py`
   (regla §10.6 de `AGENTS.md`).
 
 > Mientras este doc esté en `v0`, los payloads pueden cambiar sin aviso.
-> A partir de `v1` (tras PLAN 09) los cambios rompedores requieren bump
-> de versión explícito.
+> A partir de `v1` los cambios rompedores requieren bump de versión
+> explícito.
 
 ---
 
@@ -370,9 +371,9 @@ siguen validando los campos de `partner`.
 
 ### 4.4 `POST /chat_umayor/session/<int:session_id>/sign`
 
-> ⚠️ **Stub en v0.4**: devuelve siempre `{"ok": false, "error": {"code": "INVALID_STATE", "message": "Operación aún no disponible en esta versión."}}`. La implementación real llega en **PLAN 09** (integración con Odoo Sign). El contrato de abajo es el objetivo final, no el comportamiento actual.
-
-Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si es reintento).
+Lanza el flujo de firma con Odoo Sign. Requiere `state='review'`.
+Si ya está en `signing` con contrato asociado, es **idempotente**:
+devuelve el mismo `sign_url` sin crear nada nuevo.
 
 **Request**: body vacío (`{}`).
 
@@ -382,17 +383,96 @@ Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si
   "ok": true,
   "data": {
     "contract_id": 17,
-    "sign_url": "https://.../sign/document/17/abc123token",
+    "sign_url": "/sign/document/12345/abc123token",
     "state": "signing"
   }
 }
 ```
 
-**Errores posibles**: `SESSION_NOT_FOUND`, `SESSION_CLOSED`, `INVALID_STATE`, `MISSING_CONTRACT_DATA`, `SIGN_UNAVAILABLE`.
+**Campos de `data`**:
+| Campo         | Tipo   | Descripción                                                        |
+|---------------|--------|--------------------------------------------------------------------|
+| `contract_id` | int    | Id del ``chat_umayor.contract`` recién creado (o reutilizado si idempotente). |
+| `sign_url`    | string | URL **relativa** apta para abrir en nueva pestaña. El front hace `window.open(sign_url, '_blank', 'noopener,noreferrer')`. |
+| `state`       | string | Nuevo estado del FSM: siempre `"signing"` en éxito.                |
+
+**Errores posibles**:
+| `code`                  | Cuándo                                                                |
+|-------------------------|-----------------------------------------------------------------------|
+| `SESSION_NOT_FOUND`     | `session_id` inexistente.                                             |
+| `SESSION_CLOSED`        | Sesión en `state='closed'`.                                           |
+| `INVALID_STATE`         | La sesión no está en `review` (ni `signing` con contrato válido).     |
+| `MISSING_CONTRACT_DATA` | Sesión en `review` sin `submit_summary` (no pasó por `/submit_data`). |
+| `SIGN_UNAVAILABLE`      | Plantilla no configurada, plantilla inexistente, o fallo al crear el `sign.request`. |
+| `INTERNAL_ERROR`        | Excepción no clasificada.                                             |
 
 **Notas backend**:
-- Crea `chat_umayor.contract`, crea `sign.request` a partir de plantilla, devuelve URL pública.
-- El callback de `sign` (cuando el usuario firma) transiciona a `closed` — **no** pasa por este endpoint. El frontend debe hacer polling a `/message` o escuchar el estado por otro medio. **TBD**: definir si agregamos `GET /chat_umayor/session/<id>/state` para polling de estado post-firma.
+- Crea un `chat_umayor.contract` con **snapshot denormalizado del partner** (`partner_name`, `partner_vat`, `partner_email`, `partner_phone`) copiado al momento del create. El contrato sobrevive a cambios posteriores del `res.partner`.
+- La plantilla de firma vive en `ir.config_parameter` `chat_umayor.sign_template_id` (configurable desde Ajustes o por shell). Si está vacía → `SIGN_UNAVAILABLE`.
+- `sign_url` es una ruta **relativa** del propio Odoo, tipo `/sign/document/<request_id>/<access_token>`. El front la abre en nueva pestaña con `noopener,noreferrer`.
+- El callback de firma (cuando el usuario completa la firma en Odoo Sign) dispara un override de `sign.request._sign` que pasa el contrato a `signed` y la sesión a `closed`. **El front no recibe un push**: se entera haciendo polling a `/state` (ver §4.5).
+- Idempotencia: 2 llamadas consecutivas con sesión en `signing` devuelven el mismo `contract_id` y `sign_url`.
+
+---
+
+### 4.5 `POST /chat_umayor/session/<int:session_id>/state`
+
+Devuelve el estado actual de la sesión y del contrato (si existe).
+Endpoint ligero pensado para **polling** del front mientras el
+usuario firma en otra pestaña.
+
+Acepta sesiones en cualquier estado, **incluido `closed`**: esta es
+la diferencia clave con `/message`, que rechaza sesiones cerradas
+con `SESSION_CLOSED`.
+
+**Request**: body vacío (`{}`).
+
+**Response 200 OK (sin contrato todavía)**:
+```json
+{
+  "ok": true,
+  "data": {
+    "state": "discovery",
+    "product_code": null,
+    "contract": null
+  }
+}
+```
+
+**Response 200 OK (sesión firmada)**:
+```json
+{
+  "ok": true,
+  "data": {
+    "state": "closed",
+    "product_code": "soap",
+    "contract": {
+      "state": "signed",
+      "signed_at": "2026-05-07T14:23:11+00:00",
+      "reference": "CH-000017"
+    }
+  }
+}
+```
+
+**Campos de `data`**:
+| Campo              | Tipo                  | Descripción                                       |
+|--------------------|-----------------------|---------------------------------------------------|
+| `state`            | string                | Estado del FSM de la sesión.                       |
+| `product_code`     | `"soap" \| "deposit" \| null` | Siempre presente (alineado con `/message`). |
+| `contract`         | `object \| null`       | `null` si no hay contrato asociado.               |
+| `contract.state`   | string                | `draft` / `signing` / `signed` / `cancelled`.     |
+| `contract.signed_at` | `string \| null`    | ISO-8601 si firmado; `null` en otros estados.      |
+| `contract.reference` | string              | Identificador legible `CH-NNNNNN`.                |
+
+**Errores posibles**: `SESSION_NOT_FOUND`. No devuelve `SESSION_CLOSED`
+(acepta sesiones cerradas a propósito).
+
+**Notas backend y recomendaciones de uso**:
+- Polling a 3–5 segundos mientras la pestaña del chat esté visible (`document.visibilityState === 'visible'`), con un límite razonable (5 min).
+- Parar el polling cuando `data.contract.state === "signed"` o `data.state === "closed"`.
+- El endpoint no modifica ningún registro; es seguro llamarlo en paralelo.
+- Consulta barata: 1 read de sesión + 1 search indexéado de contrato por `session_id`.
 
 ---
 
@@ -400,7 +480,7 @@ Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si
 
 1. ~~**CSRF en JSON públicos**~~ → resuelto en `v0.1`: Odoo lo gestiona en `type='jsonrpc'`.
 2. ~~**Formato de `document_id`**~~ → resuelto en `v0.4`: **Chile, RUT con validación módulo 11**. Se acepta cualquiera de los 3 formatos y se normaliza a `NNNNNNNN-D`.
-3. **Polling de estado post-firma**: ¿endpoint dedicado `GET /state` o incluir el estado de firma en la próxima respuesta de `/message`?
+3. ~~**Polling de estado post-firma**~~ → resuelto en `v0.5`: endpoint dedicado `POST /state` (§4.5). Se descartó incrustarlo en `/message` porque el front puede estar en otra pestaña mientras firma.
 4. **Rate limiting**: no contemplado. Ante abuso del endpoint `/message`, el wrapper de Gemini ya tiene backoff (§7 AGENTS) pero no hay protección por IP.
 5. **I18n de `error.message`**: por ahora solo español. Si UI quisiera otros idiomas, agregar `Accept-Language` y `.po`.
 6. ~~**Campos de SOAP**~~ → resuelto en `v0.4`: `vehicle_plate`, `vehicle_year`, `vehicle_type`. Prima plana por tipo de vehículo.
@@ -409,6 +489,26 @@ Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si
 
 ## 6. Changelog
 
+- **v0.5** (2026-05-07): `/sign` real + nuevo endpoint `/state` (PLAN 09).
+  - `/sign` deja de ser stub: crea `chat_umayor.contract` con
+    snapshot denormalizado del partner (`partner_name`, `partner_vat`,
+    `partner_email`, `partner_phone` inmutables tras el create),
+    lanza `sign.request` con la plantilla configurable vía
+    `ir.config_parameter` `chat_umayor.sign_template_id`, y
+    transiciona `review → signing`.
+  - Idempotencia de `/sign`: 2 llamadas consecutivas devuelven el
+    mismo `contract_id` y `sign_url` si la sesión está en `signing`.
+  - Callback de Odoo Sign (override de `sign.request._sign`) cierra
+    automáticamente el contrato (`signed` + `signed_at`) y la
+    sesión (`closed`) cuando el usuario firma. Defensivo: si algo
+    del lado del chatbot falla, la firma de Odoo sigue su curso.
+  - Nuevo endpoint `POST /state` para polling. Acepta sesiones
+    `closed` (a diferencia de `/message`). Shape estable con
+    `state`, `product_code` y `contract` (null u objeto con `state`,
+    `signed_at`, `reference` tipo `CH-NNNNNN`).
+  - Nuevos errores efectivos (ya estaban en el catálogo):
+    `SIGN_UNAVAILABLE`, `MISSING_CONTRACT_DATA`.
+  - Cierra TBD 3 (polling).
 - **v0.4** (2026-05-07): `/submit_data` real (PLAN 08).
   - Implementación completa del endpoint: validación agregada por
     campo, `res.partner` idempotente por RUT (normalizado a
@@ -444,4 +544,4 @@ Lanza el flujo de firma con Odoo Sign. Requiere `state='review'` (o `signing` si
   TBD de CSRF.
 - **v0** (2026-05-02): primer draft tras PLAN 02. Sin implementación aún.
 
-<!-- v0.4 · 2026-05-07 · PLAN 08: /submit_data real con productos SOAP/Depósito y RUT chileno -->
+<!-- v0.5 · 2026-05-07 · PLAN 09: /sign real, /state nuevo, 5/5 endpoints implementados -->

@@ -1,12 +1,16 @@
-"""Expone la configuración de Gemini en Ajustes de Odoo.
+"""Expone la configuración del módulo en Ajustes de Odoo.
 
-Los 4 parámetros viven en ``ir.config_parameter`` (fuente de verdad)
+Los parámetros viven en ``ir.config_parameter`` (fuente de verdad)
 pero se reflejan como campos de ``res.config.settings`` para que un
 administrador pueda editarlos desde la UI sin tocar BD ni ficheros XML.
 
-La vista XML que renderiza estos campos es opcional (PLAN 10). Sin
-ella, los parámetros se siguen pudiendo setear directamente en
-``ir.config_parameter`` o vía la API de Odoo.
+Secciones:
+    - Gemini: api key, modelo, system prompt, timeout (PLAN 06).
+    - Firma: plantilla de ``sign.template`` usada por ``/sign`` (PLAN 09).
+
+Las vistas XML que renderizan estos campos son responsabilidad de
+Romina (ver ``HANDOFF-romina.md`` §F8). Sin ellas, los parámetros se
+setean vía ``ir.config_parameter`` o por la API de Odoo.
 """
 
 from odoo import fields, models
@@ -50,4 +54,18 @@ class ResConfigSettings(models.TransientModel):
         default=15,
         help="Timeout en segundos para cada llamada al SDK. Por defecto "
         "15s. Bajar en producción si el SLA del front <5s se ajusta.",
+    )
+
+    # ------------------------------------------------------------------
+    # Firma (PLAN 09)
+    # ------------------------------------------------------------------
+
+    chat_umayor_sign_template_id = fields.Many2one(
+        comodel_name="sign.template",
+        string="Plantilla de firma",
+        config_parameter="chat_umayor.sign_template_id",
+        help="Plantilla de Odoo Sign que se usa al lanzar ``/sign``. "
+        "Debe crearse manualmente desde el backoffice de Sign (subir "
+        "PDF + dibujar bloque de firma). Si está vacía, ``/sign`` "
+        "devuelve ``SIGN_UNAVAILABLE`` al cliente.",
     )

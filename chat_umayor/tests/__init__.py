@@ -8,3 +8,9 @@ from . import test_partner_idempotency
 from . import test_product_soap
 from . import test_product_deposit
 from . import test_controllers
+from . import test_contract
+from . import test_sign_endpoint
+from . import test_state_endpoint
+from . import test_sign_callback
+# tests/manual/ NO se importa aquí: sus tests solo corren con tag
+# explícita ``chat_umayor_manual`` (ver tests/manual/__init__.py).

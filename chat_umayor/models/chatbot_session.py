@@ -18,10 +18,14 @@ El modelo es el único responsable del FSM: ni el controller ni Gemini
 deben setear ``state`` directamente.
 """
 
+import json
+import logging
 import unicodedata
 
 from odoo import _, fields, models
 from odoo.exceptions import UserError
+
+_logger = logging.getLogger(__name__)
 
 
 class ChatbotSession(models.Model):
@@ -429,6 +433,160 @@ class ChatbotSession(models.Model):
             # defensivo.
             values["name"] = rut_norm
         return Partner.create(values)
+
+    # ------------------------------------------------------------------
+    # Lanzamiento de firma (PLAN 09)
+    # ------------------------------------------------------------------
+
+    def _launch_signature(self) -> tuple["models.Model", str]:
+        """Crea el contrato y lanza ``sign.request``; devuelve (contract, url).
+
+        Flujo:
+            1. Si ya existe un contrato para esta sesión:
+               - En ``signing``: lo reutiliza (idempotente). Devuelve
+                 el mismo ``sign_url``.
+               - En ``signed``: levanta ``UserError`` (no se relanza
+                 una firma completada).
+               - En ``cancelled``/``draft``: levanta ``UserError``
+                 para no dejar huella inconsistente.
+            2. Valida que ``submit_summary`` esté presente (PLAN 08
+               garantiza que exista tras ``/submit_data``).
+            3. Resuelve ``sign.template`` desde
+               ``ir.config_parameter`` ``chat_umayor.sign_template_id``.
+               Si falta, levanta ``UserError`` con mensaje que el
+               controller traduce a ``SIGN_UNAVAILABLE``.
+            4. Crea el contrato con snapshot denormalizado del partner.
+            5. Crea ``sign.request`` con la plantilla y el partner
+               como firmante.
+            6. Vincula ``contract.sign_request_id`` y pasa el contrato
+               a ``signing``.
+
+        Returns:
+            Tupla ``(contract_record, sign_url)``.
+
+        Raises:
+            UserError: ``submit_summary`` faltante, plantilla no
+                configurada, plantilla inexistente, o contrato en
+                estado inconsistente.
+        """
+        self.ensure_one()
+        Contract = self.env["chat_umayor.contract"].sudo()
+        existing = Contract.search([("session_id", "=", self.id)], limit=1)
+
+        if existing:
+            if existing.state == "signing":
+                # Idempotente: reutilizamos el contrato existente.
+                return existing, existing._get_sign_url()
+            if existing.state == "signed":
+                raise UserError(_("El contrato ya fue firmado."))
+            raise UserError(
+                _(
+                    "Existe un contrato en estado %(state)s para esta "
+                    "sesión; no se puede relanzar la firma."
+                )
+                % {"state": existing.state}
+            )
+
+        if not self.submit_summary:
+            raise UserError(
+                _("Faltan datos del formulario para generar el contrato.")
+            )
+
+        try:
+            summary = json.loads(self.submit_summary)
+        except (ValueError, TypeError) as exc:
+            # submit_summary se serializa en el controller (PLAN 08)
+            # con json.dumps; si llega corrupto es un bug grave.
+            _logger.exception(
+                "submit_summary corrupto en sesión %s: %s", self.id, exc
+            )
+            raise UserError(
+                _("Datos del contrato corruptos. Contacta al administrador.")
+            ) from exc
+
+        # 1. Resolver plantilla de firma desde config.
+        IrConfig = self.env["ir.config_parameter"].sudo()
+        raw_template_id = IrConfig.get_param(
+            "chat_umayor.sign_template_id", "0"
+        )
+        try:
+            template_id = int(raw_template_id)
+        except (ValueError, TypeError):
+            template_id = 0
+        if not template_id:
+            raise UserError(
+                _(
+                    "La firma no está configurada. "
+                    "Contacta al administrador."
+                )
+            )
+
+        template = (
+            self.env["sign.template"].sudo().browse(template_id).exists()
+        )
+        if not template:
+            raise UserError(
+                _(
+                    "La plantilla de firma configurada no existe. "
+                    "Contacta al administrador."
+                )
+            )
+
+        # 2. Crear contrato con snapshot denormalizado del partner.
+        partner = self.partner_id
+        contract = Contract.create(
+            {
+                "session_id": self.id,
+                "partner_id": partner.id,
+                # Snapshot denormalizado (inmutable tras create):
+                "partner_name": partner.name,
+                "partner_vat": partner.vat,
+                "partner_email": partner.email or False,
+                "partner_phone": partner.phone or False,
+                "product_code": summary["product_code"],
+                "product_data_json": json.dumps(
+                    summary["product_data"], ensure_ascii=False
+                ),
+                "calculated_json": json.dumps(
+                    summary["calculated"], ensure_ascii=False
+                ),
+            }
+        )
+
+        # 3. Crear sign.request con la plantilla. La estructura exacta
+        # (request_item_ids, signers_count, etc.) varía entre versiones
+        # de Odoo; documento aquí lo mínimo y se ajusta en staging si
+        # rompe. Referencias a validar: sign/models/sign_request.py en
+        # Odoo 19.
+        try:
+            sign_request_vals = {
+                "template_id": template.id,
+                "reference": contract.reference or _("Contrato UMayor"),
+            }
+            sign_request = (
+                self.env["sign.request"].sudo().create(sign_request_vals)
+            )
+        except Exception as exc:
+            # Si la creación del sign.request falla (plantilla mal
+            # configurada, permisos, etc.) cancelamos el contrato
+            # para no dejar basura en 'draft' y propagamos.
+            _logger.exception(
+                "Error creando sign.request para contrato %s", contract.id
+            )
+            contract.state = "cancelled"
+            raise UserError(
+                _("No se pudo iniciar la firma: %(err)s")
+                % {"err": exc}
+            ) from exc
+
+        contract.write(
+            {
+                "sign_request_id": sign_request.id,
+                "state": "signing",
+            }
+        )
+
+        return contract, contract._get_sign_url()
 
     # ------------------------------------------------------------------
     # Detección de producto (heurística)
