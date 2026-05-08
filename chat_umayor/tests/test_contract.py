@@ -82,7 +82,7 @@ class TestChatbotContract(TransactionCase):
         return fake_template, fake_sign_request
 
     # ------------------------------------------------------------------
-    # _compute_reference
+    # reference (asignado en create override)
     # ------------------------------------------------------------------
 
     def test_reference_format(self) -> None:

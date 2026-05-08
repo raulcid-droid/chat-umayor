@@ -23,7 +23,7 @@ de ``_sign`` que propaga la firma a ``_mark_signed``) y
 import logging
 
 from odoo import _, api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import UserError  # noqa: F401  (uso futuro)
 
 _logger = logging.getLogger(__name__)
 
@@ -146,9 +146,11 @@ class ChatbotContract(models.Model):
     )
     reference = fields.Char(
         string="Referencia",
-        compute="_compute_reference",
-        store=True,
-        help="Identificador legible tipo ``CH-000017``.",
+        readonly=True,
+        copy=False,
+        index=True,
+        help="Identificador legible tipo ``CH-000017``. Se asigna en "
+        "``create`` una vez que el ORM genera el id numérico.",
     )
 
     # ------------------------------------------------------------------
@@ -164,22 +166,25 @@ class ChatbotContract(models.Model):
     ]
 
     # ------------------------------------------------------------------
-    # Computes
+    # Create: asignar reference tras obtener id
     # ------------------------------------------------------------------
 
-    @api.depends("id")
-    def _compute_reference(self) -> None:
-        """Calcula ``reference`` como ``CH-NNNNNN`` (6 dígitos, left-pad 0).
+    @api.model_create_multi
+    def create(self, vals_list):
+        """Crea registros y asigna ``reference`` tipo ``CH-NNNNNN``.
 
-        Los registros nuevos (antes del flush, ``NewId``) quedan con
-        ``reference`` vacío hasta que el ORM les asigna un ``id``
-        numérico. El campo es ``store=True`` para poder buscar por él.
+        El ``reference`` depende del ``id`` generado por la BD, que
+        sólo existe tras ``super().create()``. Odoo 19 rechaza
+        ``@api.depends('id')`` en un computed field; por eso
+        sobreescribimos ``create`` y seteamos el campo manualmente
+        una vez tenemos el id. Si el llamador provee ``reference``
+        en ``vals``, se respeta (caso import/migración).
         """
-        for contract in self:
-            if isinstance(contract.id, int):
-                contract.reference = f"CH-{contract.id:06d}"
-            else:
-                contract.reference = False
+        records = super().create(vals_list)
+        for rec in records:
+            if not rec.reference:
+                rec.reference = f"CH-{rec.id:06d}"
+        return records
 
     # ------------------------------------------------------------------
     # Transiciones
