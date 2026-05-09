@@ -25,6 +25,13 @@
     message: (id) => `/chat_umayor/session/${id}/message`,
     submitData: (id) => `/chat_umayor/session/${id}/submit_data`,
     sign: (id) => `/chat_umayor/session/${id}/sign`,
+    state: (id) => `/chat_umayor/session/${id}/state`,
+  };
+
+  // Estado del polling (F6)
+  const pollingState = {
+    intervalId: null,
+    timeoutId: null,
   };
 
   // Estado interno - vinculado a la sesión de Jonathan cuando exista
@@ -175,7 +182,9 @@
         renderSuggestions(data.suggestions);
       }
       if (data.state === "data_collection") {
-        renderDataForm(data.product_code || detectProduct(data.reply));
+        sessionState.lastProductCode =
+          data.product_code || detectProduct(data.reply);
+        renderDataForm(sessionState.lastProductCode);
       }
       if (data.state === "review") {
         // Caso borde: el backend pasó a 'review' por mensaje sin
@@ -546,16 +555,24 @@
     msgsEl.scrollTop = msgsEl.scrollHeight;
   }
 
+  // ---------------------------------------------------------------
+  // F5 — Lanzar firma con manejo de errores por código
+  // ---------------------------------------------------------------
   async function launchSign() {
     const wrap =
       document.querySelector(".cu-review") ||
       document.querySelector(".cu-sign");
+    const btn = wrap ? wrap.querySelector(".cu-sign-btn") : null;
+
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Procesando...";
+    }
+
+    // Limpiar banners previos
     if (wrap) {
-      const btn = wrap.querySelector(".cu-sign-btn");
-      if (btn) {
-        btn.disabled = true;
-        btn.textContent = "Procesando...";
-      }
+      const prev = wrap.querySelector(".cu-sign-banner");
+      if (prev) prev.remove();
     }
 
     let response;
@@ -569,33 +586,218 @@
         );
       }
     } catch (err) {
-      response = { ok: false, error: { message: "Error al iniciar firma." } };
+      response = {
+        ok: false,
+        error: { code: "INTERNAL_ERROR", message: "Error al iniciar firma." },
+      };
     }
 
     if (response && response.ok && response.data && response.data.sign_url) {
-      appendMessage("Te llevamos al documento de firma.", "bot");
-      window.open(response.data.sign_url, "_blank", "noopener");
+      // ✅ Éxito: abrir sign_url en nueva pestaña y arrancar polling (F6)
+      appendMessage(
+        "Abrimos el documento de firma en una nueva pestaña.",
+        "bot",
+      );
+      window.open(response.data.sign_url, "_blank", "noopener,noreferrer");
       if (wrap) wrap.remove();
+      startPolling(); // F6
     } else {
-      const errMsg =
-        (response && response.error && response.error.message) ||
-        "No se pudo iniciar la firma.";
-      appendMessage(errMsg, "bot");
+      // ❌ Error: mapear por code y mostrar UX apropiada
+      const err = (response && response.error) || {};
+      const code = err.code || "INTERNAL_ERROR";
+      const msg = err.message || "";
+
+      let bannerText = "";
+      let allowBack = false;
+      let reloadPage = false;
+
+      switch (code) {
+        case "SIGN_UNAVAILABLE":
+          bannerText =
+            "La firma no está disponible. Contacta al administrador.";
+          break;
+        case "INVALID_STATE":
+          bannerText = msg || "Estado inválido para firmar.";
+          break;
+        case "MISSING_CONTRACT_DATA":
+          bannerText = "Faltan datos. Vuelve al formulario.";
+          allowBack = true;
+          break;
+        case "SESSION_NOT_FOUND":
+          reloadPage = true;
+          break;
+        case "SESSION_CLOSED":
+          bannerText = "La sesión ya terminó.";
+          reloadPage = true;
+          break;
+        case "INTERNAL_ERROR":
+        default:
+          bannerText = "Ocurrió un problema interno. Intenta más tarde.";
+          break;
+      }
+
+      if (reloadPage) {
+        appendMessage(bannerText || "La sesión expiró, recargando...", "bot");
+        setTimeout(() => location.reload(), 2000);
+        return;
+      }
+
+      // Mostrar banner de error dentro de la tarjeta
       if (wrap) {
-        const btn = wrap.querySelector(".cu-sign-btn");
+        const banner = document.createElement("div");
+        banner.className = "cu-sign-banner cu-sign-banner--error";
+        banner.textContent = bannerText;
+        wrap.insertBefore(banner, btn);
+
+        if (allowBack) {
+          // Permitir volver al formulario: simplemente reactivamos el botón
+          // con texto de reintento y mostramos un link de "volver"
+          const backBtn = document.createElement("button");
+          backBtn.type = "button";
+          backBtn.className = "cu-chip";
+          backBtn.textContent = "← Volver al formulario";
+          backBtn.style.marginTop = "8px";
+          backBtn.addEventListener("click", () => {
+            wrap.remove();
+            sessionState.currentState = "data_collection";
+            appendMessage("Puedes corregir los datos en el formulario.", "bot");
+            renderDataForm(sessionState.lastProductCode || "soap");
+          });
+          wrap.insertBefore(backBtn, btn);
+        }
+
+        // Restaurar botón para reintentar
         if (btn) {
           btn.disabled = false;
-          // Restauramos el contenido original (icono + texto)
           btn.innerHTML = `
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
-                             style="vertical-align: middle; margin-right: 6px">
-                            <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
-                        </svg>
-                        Firmar contrato
-                    `;
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
+                 style="vertical-align: middle; margin-right: 6px">
+              <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+            </svg>
+            Reintentar firma
+          `;
         }
+      } else {
+        appendMessage(bannerText, "bot");
       }
     }
+  }
+
+  // ---------------------------------------------------------------
+  // F6 — Polling de estado tras abrir sign_url
+  // ---------------------------------------------------------------
+  const POLL_INTERVAL_MS = 4000; // cada 4 s
+  const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min máximo
+
+  function startPolling() {
+    stopPolling(); // limpiar polling previo si lo hubiera
+
+    appendMessage("Esperando confirmación de firma…", "bot");
+
+    // Baner de espera con fallback manual
+    const msgsEl = document.getElementById("chatbot-messages");
+    const waitEl = document.createElement("div");
+    waitEl.className = "cu-extras cu-poll-wait";
+    waitEl.innerHTML = `
+      <span class="cu-poll-spinner"></span>
+      <span class="cu-poll-label">Verificando estado de la firma…</span>
+    `;
+    msgsEl.appendChild(waitEl);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+
+    // Timeout de 5 minutos: si no terminó, mostramos fallback
+    pollingState.timeoutId = setTimeout(() => {
+      stopPolling();
+      if (waitEl.parentNode) waitEl.remove();
+      showPollTimeout();
+    }, POLL_TIMEOUT_MS);
+
+    // Intervalo de polling
+    pollingState.intervalId = setInterval(async () => {
+      // Solo pollear si la pestaña está visible
+      if (document.visibilityState !== "visible") return;
+
+      let result;
+      try {
+        if (sessionState.demoMode) {
+          result = await demoState();
+        } else {
+          result = await callEndpoint(
+            ENDPOINTS.state(sessionState.sessionId),
+            {},
+          );
+        }
+      } catch (err) {
+        // Error de red: seguimos intentando hasta el timeout
+        return;
+      }
+
+      if (!result || !result.ok) return;
+
+      const { state, contract } = result.data || {};
+
+      if (state === "closed" || (contract && contract.state === "signed")) {
+        stopPolling();
+        if (waitEl.parentNode) waitEl.remove();
+        const ref = (contract && contract.reference) || "";
+        showSignedSuccess(ref);
+      }
+      // Si state === "signing" seguimos esperando (continuePolling implícito)
+    }, POLL_INTERVAL_MS);
+  }
+
+  function stopPolling() {
+    if (pollingState.intervalId) {
+      clearInterval(pollingState.intervalId);
+      pollingState.intervalId = null;
+    }
+    if (pollingState.timeoutId) {
+      clearTimeout(pollingState.timeoutId);
+      pollingState.timeoutId = null;
+    }
+  }
+
+  function showSignedSuccess(reference) {
+    const msgsEl = document.getElementById("chatbot-messages");
+    const el = document.createElement("div");
+    el.className = "cu-extras cu-signed-success";
+    el.innerHTML = `
+      <div class="cu-signed-icon">✓</div>
+      <div class="cu-signed-title">¡Contrato firmado!</div>
+      ${reference ? `<div class="cu-signed-ref">Referencia: <strong>${escapeHtml(reference)}</strong></div>` : ""}
+      <p class="cu-signed-msg">Tu contrato ha sido firmado exitosamente. Recibirás una copia por email.</p>
+    `;
+    msgsEl.appendChild(el);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+    sessionState.currentState = "closed";
+  }
+
+  function showPollTimeout() {
+    const msgsEl = document.getElementById("chatbot-messages");
+    const el = document.createElement("div");
+    el.className = "cu-extras cu-poll-timeout";
+    el.innerHTML = `
+      <p>¿Ya firmaste? Si completaste la firma, recarga la página para ver el resultado.</p>
+      <button type="button" class="cu-chip" id="cu-reload-btn">Recargar página</button>
+    `;
+    msgsEl.appendChild(el);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+    el.querySelector("#cu-reload-btn").addEventListener("click", () =>
+      location.reload(),
+    );
+  }
+
+  // Demo stub para /state
+  async function demoState() {
+    await sleep(300);
+    // En demo, simular éxito tras la primera llamada
+    return {
+      ok: true,
+      data: {
+        state: "closed",
+        contract: { state: "signed", reference: "CH-000999" },
+      },
+    };
   }
 
   // ---------------------------------------------------------------

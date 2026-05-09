@@ -1,3 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
+    <!-- Los assets JS/CSS del chatbot se declaran en __manifest__.py
+         bajo la clave 'assets' > 'web.assets_frontend'.
+         Este archivo existe para declaraciones XML adicionales
+         (p.ej. templates QWeb del widget si se necesitan en el futuro). -->
 </odoo>

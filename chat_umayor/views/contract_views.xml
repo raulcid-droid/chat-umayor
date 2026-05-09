@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ================================================================
+         F7 — Vistas backoffice del modelo chat_umayor.contract
+         ================================================================ -->
+
+    <!-- ----------------------------------------------------------------
+         Tree view
+         ---------------------------------------------------------------- -->
+    <record id="view_chat_umayor_contract_tree" model="ir.ui.view">
+        <field name="name">chat_umayor.contract.tree</field>
+        <field name="model">chat_umayor.contract</field>
+        <field name="arch" type="xml">
+            <list string="Contratos Chat UMayor" default_order="create_date desc">
+                <field name="reference"/>
+                <field name="partner_name"/>
+                <field name="partner_vat"/>
+                <field name="product_code"/>
+                <field name="state"
+                       decoration-success="state == 'signed'"
+                       decoration-warning="state == 'signing'"
+                       decoration-muted="state == 'cancelled'"
+                       decoration-info="state == 'draft'"
+                       widget="badge"/>
+                <field name="signed_at"/>
+                <field name="create_date"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ----------------------------------------------------------------
+         Form view
+         ---------------------------------------------------------------- -->
+    <record id="view_chat_umayor_contract_form" model="ir.ui.view">
+        <field name="name">chat_umayor.contract.form</field>
+        <field name="model">chat_umayor.contract</field>
+        <field name="arch" type="xml">
+            <form string="Contrato Chat UMayor">
+                <header>
+                    <field name="state"
+                           widget="statusbar"
+                           statusbar_visible="draft,signing,signed"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="reference" readonly="1"/>
+                        </h1>
+                    </div>
+
+                    <group string="Relaciones">
+                        <field name="session_id" readonly="1"/>
+                        <field name="partner_id"/>
+                        <field name="sign_request_id"
+                               widget="many2one_button"
+                               string="Solicitud de firma (Ver firma)"/>
+                    </group>
+
+                    <group string="Datos del cliente (snapshot al firmar)">
+                        <field name="partner_name" readonly="1"/>
+                        <field name="partner_vat"   readonly="1"/>
+                        <field name="partner_email"  readonly="1"/>
+                        <field name="partner_phone"  readonly="1"/>
+                    </group>
+
+                    <group string="Producto">
+                        <field name="product_code" readonly="1"/>
+                        <field name="signed_at"    readonly="1"/>
+                        <field name="create_date"  readonly="1"/>
+                    </group>
+
+                    <notebook>
+                        <page string="Datos del producto (JSON)">
+                            <field name="product_data_json"
+                                   widget="text"
+                                   readonly="1"
+                                   style="font-family: monospace; font-size: 12px;"/>
+                        </page>
+                        <page string="Cálculo (JSON)">
+                            <field name="calculated_json"
+                                   widget="text"
+                                   readonly="1"
+                                   style="font-family: monospace; font-size: 12px;"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ----------------------------------------------------------------
+         Search view
+         ---------------------------------------------------------------- -->
+    <record id="view_chat_umayor_contract_search" model="ir.ui.view">
+        <field name="name">chat_umayor.contract.search</field>
+        <field name="model">chat_umayor.contract</field>
+        <field name="arch" type="xml">
+            <search string="Contratos">
+                <field name="reference"/>
+                <field name="partner_name"/>
+                <field name="partner_vat"/>
+                <filter name="signed"    string="Firmados"     domain="[('state','=','signed')]"/>
+                <filter name="signing"   string="En firma"     domain="[('state','=','signing')]"/>
+                <filter name="draft"     string="Borrador"     domain="[('state','=','draft')]"/>
+                <filter name="cancelled" string="Cancelados"   domain="[('state','=','cancelled')]"/>
+                <group expand="0" string="Agrupar por">
+                    <filter name="group_product" string="Producto" context="{'group_by': 'product_code'}"/>
+                    <filter name="group_state"   string="Estado"   context="{'group_by': 'state'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- ----------------------------------------------------------------
+         Action
+         ---------------------------------------------------------------- -->
+    <record id="action_chat_umayor_contract" model="ir.actions.act_window">
+        <field name="name">Contratos Chat UMayor</field>
+        <field name="res_model">chat_umayor.contract</field>
+        <field name="view_mode">list,form</field>
+        <field name="view_ids" eval="[
+            (5, 0, 0),
+            (0, 0, {'view_mode': 'list', 'view_id': ref('view_chat_umayor_contract_tree')}),
+            (0, 0, {'view_mode': 'form', 'view_id': ref('view_chat_umayor_contract_form')}),
+        ]"/>
+        <field name="context">{}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No hay contratos aún.
+            </p>
+            <p>
+                Los contratos se crean automáticamente cuando un usuario
+                completa el flujo de firma en el chatbot.
+            </p>
+        </field>
+    </record>
+
+    <!-- ----------------------------------------------------------------
+         Menú "Chat UMayor" + ítem Contratos
+         ---------------------------------------------------------------- -->
+    <menuitem id="menu_chat_umayor_root"
+              name="Chat UMayor"
+              sequence="90"
+              web_icon="chat_umayor,static/description/icon.png"/>
+
+    <menuitem id="menu_chat_umayor_contracts"
+              name="Contratos"
+              parent="menu_chat_umayor_root"
+              action="action_chat_umayor_contract"
+              sequence="10"/>
+
+</odoo>
